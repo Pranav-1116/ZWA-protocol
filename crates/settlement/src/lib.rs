@@ -46,7 +46,10 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod audit;
 pub mod control;
+pub mod execution;
+pub mod integration;
 pub mod non_custodial;
 pub mod production;
 pub mod replay;
