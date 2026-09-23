@@ -637,7 +637,7 @@ mod tests {
         // let _fake = VerifiedTrade { checked_trade: ..., _private: () }; // fails outside module
         // Debug is allowed, but Display is not implemented
         let debug_str = format!("{:?}", verified);
-        assert!(debug_str.contains(\"VerifiedTrade\"));
+        assert!(debug_str.contains("VerifiedTrade"));
     }
 
     #[test]
@@ -660,7 +660,7 @@ mod tests {
         match err {
             GateRejection::IllegalState { .. } => {}
             GateRejection::AlreadyConsumed => {}
-            other => panic!(\"identical request twice must not create second approval, got {other:?}\"),
+            other => panic!("identical request twice must not create second approval, got {other:?}"),
         }
 
         // Still only one record, still SETTLEMENT_CONSTRUCTED
@@ -679,17 +679,17 @@ mod tests {
         // Early failure 1: Commitment mismatch (Step 2) — cheapest gate
         let (mut input, gate) = valid_gate_input();
         let commitment = input.commitment;
-        assert!(gate.replay_store().state(commitment).is_none(), \"precondition empty\");
+        assert!(gate.replay_store().state(commitment).is_none(), "precondition empty");
         input.intent.offered_amount = TradeAmount::new(9999);
         let err = gate.evaluate(input).unwrap_err();
         match err {
             GateRejection::CommitmentMismatch { .. } => {}
-            other => panic!(\"expected CommitmentMismatch, got {other:?}\"),
+            other => panic!("expected CommitmentMismatch, got {other:?}"),
         }
         // Replay store must still be empty — no create, no verify, no proof verification, no construction
         assert!(
             gate.replay_store().state(commitment).is_none(),
-            \"early commitment mismatch must not create replay record, must not run later verifiers\"
+            "early commitment mismatch must not create replay record, must not run later verifiers"
         );
 
         // Early failure 2: Root auth failure (Step 3) — before control, replay, proofs
@@ -700,7 +700,7 @@ mod tests {
         let sk_issuer = signing_key(1);
         let issuer_payload_bad = zwa_credentials::IssuerRootPayload::new(
             AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(),
-            IssuerKeyId::new(b\"issuer-atlas\").unwrap(),
+            IssuerKeyId::new(b"issuer-atlas").unwrap(),
             RootVersion::new(99),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
@@ -715,11 +715,11 @@ mod tests {
         let err = gate2.evaluate(input2).unwrap_err();
         match err {
             GateRejection::RootAuth(_) => {}
-            other => panic!(\"expected RootAuth, got {other:?}\"),
+            other => panic!("expected RootAuth, got {other:?}"),
         }
         assert!(
             gate2.replay_store().state(commitment2).is_none(),
-            \"root auth failure must not create replay record, must not run control/proof verifiers\"
+            "root auth failure must not create replay record, must not run control/proof verifiers"
         );
 
         // Early failure 3: Control failure (Step 5) — before replay and proofs
@@ -730,11 +730,11 @@ mod tests {
         let err = gate3.evaluate(input3).unwrap_err();
         match err {
             GateRejection::Control(_) => {}
-            other => panic!(\"expected Control failure, got {other:?}\"),
+            other => panic!("expected Control failure, got {other:?}"),
         }
         assert!(
             gate3.replay_store().state(commitment3).is_none(),
-            \"control failure must not create replay record, must not run proof verifiers\"
+            "control failure must not create replay record, must not run proof verifiers"
         );
     }
 
