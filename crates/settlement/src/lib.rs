@@ -48,6 +48,7 @@
 
 pub mod control;
 pub mod non_custodial;
+pub mod replay;
 pub mod zsa;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
