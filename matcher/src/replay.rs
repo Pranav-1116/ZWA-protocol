@@ -1357,7 +1357,7 @@ mod tests {
 
         // File exists and contains valid versioned JSON
         let content_before = fs::read_to_string(&path).unwrap();
-        assert!(content_before.contains(""schema_version""));
+        assert!(content_before.contains("schema_version"));
         assert!(content_before.contains(PHASE_0G_GOLDEN));
 
         // Simulate crash during write: create tmp file with partial content, but don't rename

@@ -464,7 +464,7 @@ mod tests {
     use zwa_credentials::{AuthorityKeyId, IssuerKeyId};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
-    use zwa_protocol::proof::OpaqueProof;
+    use zwa_protocol::proof::{OpaqueProof, ProvenanceVerifier, EligibilityVerifier};
     use zwa_protocol::{
         AssetBaseBytes, AuthorizedIssuanceRoot, ActiveCredentialRoot, MatcherFee, OpaqueSignature,
         PolicyRoot, RecipientCommitment, TradeAmount, TradeNonce, ZatoshiAmount, TradeIntent,

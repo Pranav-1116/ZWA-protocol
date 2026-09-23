@@ -120,8 +120,8 @@ impl RecipientControlChallenge {
 
         let mut nonce = [0u8; 32];
         {
-            use ed25519_dalek::rand_core::RngCore;
-            let mut rng = ed25519_dalek::rand_core::OsRng;
+            use rand_core::{OsRng, RngCore};
+            let mut rng = OsRng;
             rng.fill_bytes(&mut nonce);
         }
 
