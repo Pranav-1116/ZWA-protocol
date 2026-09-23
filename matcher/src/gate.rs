@@ -580,7 +580,7 @@ mod tests {
             [7u8; 32],
             CONTROL_DOMAIN.to_vec(),
             UnixSeconds::new(1_900_000_000),
-            UnixSeconds::new(1_900_000_300),
+            UnixSeconds::new(2_100_000_000),
             commitment,
         )
         .unwrap();
@@ -776,7 +776,7 @@ mod tests {
             [8u8; 32],
             CONTROL_DOMAIN.to_vec(),
             UnixSeconds::new(1_900_000_000),
-            UnixSeconds::new(1_900_000_300),
+            UnixSeconds::new(2_100_000_000),
             commitment_b,
         ).unwrap();
         let sk_b = signing_key(9);
@@ -944,7 +944,7 @@ mod tests {
             [7u8; 32],
             CONTROL_DOMAIN.to_vec(),
             UnixSeconds::new(1_900_000_000),
-            UnixSeconds::new(1_900_000_300),
+            UnixSeconds::new(2_100_000_000),
             commitment,
         ).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);

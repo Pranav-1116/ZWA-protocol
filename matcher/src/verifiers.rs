@@ -735,8 +735,8 @@ mod tests {
         // Should be ProofRejected (ark returns false) or PublicInputMismatch equivalent
         assert!(!result.is_valid());
 
-        // Wrong commitment
-        let wrong_commitment = TradeCommitment::from_decimal_str(OTHER_COMMITMENT).unwrap();
+        // Wrong commitment - must be different from real (7409...), so use TRADE_COMMITMENT (10187...)
+        let wrong_commitment = TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
         let result = prov_verifier.verify(real_prov_root, wrong_commitment, &prov_proof);
         assert!(!result.is_valid(), "wrong commitment must not verify");
 
