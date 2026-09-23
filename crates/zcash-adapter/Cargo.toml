@@ -1,0 +1,17 @@
+[package]
+name = "zwa-zcash-adapter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Pranav-1116/ZWA-protocol"
+description = "Zcash experimental ZSA adapter boundary — QEDIT pinned stack, fail-closed, experimental label. Reserved for pinned experimental settlement integration, must not imply production mainnet support."
+
+[dependencies]
+zwa-protocol = { path = "../protocol", version = "0.1.0" }
+zwa-matcher = { path = "../../matcher", version = "0.1.0" }
+zwa-settlement = { path = "../settlement", version = "0.1.0" }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
