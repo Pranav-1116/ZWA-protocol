@@ -119,11 +119,7 @@ impl RecipientControlChallenge {
             })?;
 
         let mut nonce = [0u8; 32];
-        {
-            use rand_core::{OsRng, RngCore};
-            let mut rng = OsRng;
-            rng.fill_bytes(&mut nonce);
-        }
+        getrandom::getrandom(&mut nonce).expect("OsRng failure");
 
         Self::new(receiver, nonce, domain, issued_at, expiry, trade_commitment)
     }
