@@ -46,6 +46,8 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod non_custodial;
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zwa_matcher::{MatcherApproval, VerifiedTrade};
@@ -102,10 +104,10 @@ pub enum SettlementError {
 /// except via `sign()` which requires seller's control signing key.
 #[derive(Debug)]
 pub struct SellerAuthorization {
-    signature: [u8; 64],
-    verifying_key: VerifyingKey,
-    commitment: TradeCommitment,
-    _private: (),
+    pub(crate) signature: [u8; 64],
+    pub(crate) verifying_key: VerifyingKey,
+    pub(crate) commitment: TradeCommitment,
+    pub(crate) _private: (),
 }
 
 impl SellerAuthorization {
@@ -147,10 +149,10 @@ impl SellerAuthorization {
 /// Distinct type from `SellerAuthorization` — type-level prevents mixing.
 #[derive(Debug)]
 pub struct BuyerAuthorization {
-    signature: [u8; 64],
-    verifying_key: VerifyingKey,
-    commitment: TradeCommitment,
-    _private: (),
+    pub(crate) signature: [u8; 64],
+    pub(crate) verifying_key: VerifyingKey,
+    pub(crate) commitment: TradeCommitment,
+    pub(crate) _private: (),
 }
 
 impl BuyerAuthorization {
@@ -252,7 +254,7 @@ impl SettlementDraft {
     }
 
     /// Computes canonical bytes from intent + commitment.
-    fn compute_canonical_bytes(intent: &TradeIntent, commitment: &TradeCommitment) -> Vec<u8> {
+    pub(crate) fn compute_canonical_bytes(intent: &TradeIntent, commitment: &TradeCommitment) -> Vec<u8> {
         let mut out = Vec::with_capacity(
             SETTLEMENT_DOMAIN.len() + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 8,
         );
