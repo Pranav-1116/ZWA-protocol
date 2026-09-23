@@ -137,7 +137,7 @@ fn g1_from_snarkjs(point: &SnarkjsG1Json) -> Result<G1Affine, Groth16Verificatio
     let z_str = &point[2];
 
     // Infinity check: [0,1,0] or [0,0,0]
-    if (x_str == "0" && y_str == "1" && z_str == "0") || (x_str == "0" && y_str == "0" && z_str == "0") {
+    if x_str == "0" && z_str == "0" && (y_str == "0" || y_str == "1") {
         return Ok(G1Affine::zero());
     }
 
@@ -175,9 +175,8 @@ fn g2_from_snarkjs(point: &SnarkjsG2Json) -> Result<G2Affine, Groth16Verificatio
     let z_c0 = &point[2][0];
     let z_c1 = &point[2][1];
 
-    // Infinity check: all zeros or z = [0,0]
-    if (x_c0 == "0" && x_c1 == "0" && y_c0 == "0" && y_c1 == "0" && z_c0 == "0" && z_c1 == "0")
-        || (z_c0 == "0" && z_c1 == "0")
+    // Infinity check: all zeros or z = [0,0] — second condition subsumes first
+    if z_c0 == "0" && z_c1 == "0"
     {
         return Ok(G2Affine::zero());
     }
