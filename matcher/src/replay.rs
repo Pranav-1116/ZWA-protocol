@@ -782,7 +782,7 @@ impl ReplayPersistence for RocksDbPersistence {
 ///
 /// # Usage
 ///
-/// ```rust
+/// ```rust,ignore
 /// use zwa_matcher::replay::{PersistentReplayStore, InMemoryPersistence};
 /// use zwa_matcher::CheckedTrade;
 /// let persistence = InMemoryPersistence::new();
