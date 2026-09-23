@@ -1,4 +1,4 @@
-//! Recipient-control challenge — Task C.
+//! Recipient-control challenge — Task C + A5 boundary.
 //!
 //! Phase 1B binds an authority-approved Orchard receiver into the credential
 //! leaf: `credential(receiver A) + trade(receiver A) → valid`, `credential(A) + trade(B) → invalid`.
@@ -18,15 +18,22 @@
 //! The exact Zcash wallet mechanism is still research, so this module implements
 //! a secure, auditable challenge/response that does not reimplement Orchard internals:
 //!
-//! - Challenge: `{ domain, nonce[32], issued_at, expiry, receiver }`
-//! - Canonical bytes signed: `domain || nonce || issued_at BE || expiry BE || receiver 43B`
+//! - Challenge: `{ domain, nonce[32], issued_at, expiry, receiver, trade_commitment }`
+//! - Canonical bytes signed: `domain || nonce || issued_at BE || expiry BE || receiver 43B || trade_commitment 32B`
 //! - Wallet signs with Ed25519 control key associated with that receiver.
-//! - Matcher verifies nonce match, receiver match, domain match, freshness, and Ed25519 sig.
+//! - Matcher verifies nonce match, receiver match, trade_commitment match, domain match, freshness, and Ed25519 sig.
 //!
 //! The binding between control key and receiver is via an approved map
 //! `BTreeMap<OrchardReceiverBytes, VerifyingKey>` — the venue registers which
 //! control key controls which approved receiver. This is sufficient for the MVP
 //! and makes the security boundary explicit: approval ≠ control.
+//!
+//! # A5: Verifier Boundary
+//!
+//! - `RecipientControlVerifier` trait is the opaque boundary for Vikram V4.
+//! - Production default is fail-closed: `UnconfiguredControlVerifier` returns `Unconfigured` error.
+//! - Real Ed25519 path is `RecipientControlAuthenticator`.
+//! - Test-only fake `FakeControlVerifier` behind `#[cfg(test)]` always passes, never reachable in prod.
 
 use std::collections::BTreeMap;
 
@@ -34,7 +41,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use zwa_commitments::receiver_commitment;
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::{TradeExpiry, UnixSeconds};
-use zwa_protocol::values::ReceiverCommitment;
+use zwa_protocol::values::{ReceiverCommitment, TradeCommitment};
 
 /// Domain for recipient-control challenge.
 ///
@@ -45,6 +52,8 @@ pub const CONTROL_DOMAIN: &[u8] = b"ZWA-RECIPIENT-CTRL-V1";
 pub const DEFAULT_CONTROL_TTL_SECONDS: u64 = 300;
 
 /// A challenge issued by the matcher to prove live control of a receiver.
+///
+/// Includes trade_commitment binding per A5 spec: domain||nonce||issued_at||expiry||receiver||trade_commitment
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipientControlChallenge {
     nonce: [u8; 32],
@@ -52,6 +61,7 @@ pub struct RecipientControlChallenge {
     issued_at: UnixSeconds,
     expiry: UnixSeconds,
     receiver: OrchardReceiverBytes,
+    trade_commitment: TradeCommitment,
 }
 
 impl RecipientControlChallenge {
@@ -66,6 +76,7 @@ impl RecipientControlChallenge {
         domain: Vec<u8>,
         issued_at: UnixSeconds,
         expiry: UnixSeconds,
+        trade_commitment: TradeCommitment,
     ) -> Result<Self, ControlError> {
         if issued_at.get() > expiry.get() {
             return Err(ControlError::InvalidWindow {
@@ -82,6 +93,7 @@ impl RecipientControlChallenge {
             issued_at,
             expiry,
             receiver,
+            trade_commitment,
         })
     }
 
@@ -94,6 +106,7 @@ impl RecipientControlChallenge {
     /// Returns `ControlError` for window inversion or RNG failure.
     pub fn new_random(
         receiver: OrchardReceiverBytes,
+        trade_commitment: TradeCommitment,
         issued_at: UnixSeconds,
         ttl_seconds: u64,
         domain: Vec<u8>,
@@ -112,22 +125,24 @@ impl RecipientControlChallenge {
             rng.fill_bytes(&mut nonce);
         }
 
-        Self::new(receiver, nonce, domain, issued_at, expiry)
+        Self::new(receiver, nonce, domain, issued_at, expiry, trade_commitment)
     }
 
     /// Canonical bytes that the wallet must sign.
     ///
-    /// Layout: `domain || nonce || issued_at 8B BE || expiry 8B BE || receiver 43B`
-    /// All fields are included to prevent replay across domains, times, or receivers.
+    /// Layout: `domain || nonce || issued_at 8B BE || expiry 8B BE || receiver 43B || trade_commitment 32B`
+    /// All fields are included to prevent replay across domains, times, receivers, or trades.
     #[must_use]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut out =
-            Vec::with_capacity(self.domain.len() + 32 + 8 + 8 + self.receiver.as_bytes().len());
+        let mut out = Vec::with_capacity(
+            self.domain.len() + 32 + 8 + 8 + self.receiver.as_bytes().len() + 32,
+        );
         out.extend_from_slice(&self.domain);
         out.extend_from_slice(&self.nonce);
         out.extend_from_slice(&self.issued_at.get().to_be_bytes());
         out.extend_from_slice(&self.expiry.get().to_be_bytes());
         out.extend_from_slice(self.receiver.as_bytes());
+        out.extend_from_slice(&self.trade_commitment.to_be_bytes());
         out
     }
 
@@ -167,6 +182,12 @@ impl RecipientControlChallenge {
         &self.receiver
     }
 
+    /// Trade commitment this challenge is bound to.
+    #[must_use]
+    pub fn trade_commitment(&self) -> TradeCommitment {
+        self.trade_commitment
+    }
+
     /// Receiver commitment `H(RECEIVR1, limb0, limb1, limb2)` — canonical.
     #[must_use]
     pub fn receiver_commitment(&self) -> ReceiverCommitment {
@@ -179,29 +200,37 @@ impl RecipientControlChallenge {
 pub struct RecipientControlResponse {
     nonce: [u8; 32],
     receiver: OrchardReceiverBytes,
+    trade_commitment: TradeCommitment,
     signature: [u8; 64],
 }
 
 impl RecipientControlResponse {
     /// Builds response from explicit fields.
     #[must_use]
-    pub fn new(nonce: [u8; 32], receiver: OrchardReceiverBytes, signature: [u8; 64]) -> Self {
+    pub fn new(
+        nonce: [u8; 32],
+        receiver: OrchardReceiverBytes,
+        trade_commitment: TradeCommitment,
+        signature: [u8; 64],
+    ) -> Self {
         Self {
             nonce,
             receiver,
+            trade_commitment,
             signature,
         }
     }
 
     /// Signs a challenge with a control signing key.
     ///
-    /// The signature is over `challenge.canonical_bytes()`.
+    /// The signature is over `challenge.canonical_bytes()` which includes trade_commitment.
     #[must_use]
     pub fn sign(challenge: &RecipientControlChallenge, signing_key: &SigningKey) -> Self {
         let sig = signing_key.sign(&challenge.canonical_bytes());
         Self {
             nonce: challenge.nonce,
             receiver: challenge.receiver,
+            trade_commitment: challenge.trade_commitment,
             signature: sig.to_bytes(),
         }
     }
@@ -218,6 +247,12 @@ impl RecipientControlResponse {
         &self.receiver
     }
 
+    /// Trade commitment echoed from challenge.
+    #[must_use]
+    pub fn trade_commitment(&self) -> TradeCommitment {
+        self.trade_commitment
+    }
+
     /// Ed25519 signature over challenge canonical bytes.
     #[must_use]
     pub fn signature(&self) -> &[u8; 64] {
@@ -230,6 +265,7 @@ impl RecipientControlResponse {
 pub struct VerifiedRecipientControl {
     receiver: OrchardReceiverBytes,
     receiver_commitment: ReceiverCommitment,
+    trade_commitment: TradeCommitment,
 }
 
 impl VerifiedRecipientControl {
@@ -244,59 +280,116 @@ impl VerifiedRecipientControl {
     pub fn receiver_commitment(&self) -> ReceiverCommitment {
         self.receiver_commitment
     }
+
+    /// Trade commitment that was bound to challenge.
+    #[must_use]
+    pub fn trade_commitment(&self) -> TradeCommitment {
+        self.trade_commitment
+    }
 }
 
 /// Errors from recipient-control authentication.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ControlError {
-    #[error("invalid challenge window: issued_at {issued_at} > expiry {expiry}")]
+    #[error(\"invalid challenge window: issued_at {issued_at} > expiry {expiry}\")]
     InvalidWindow { issued_at: u64, expiry: u64 },
 
-    #[error("control domain must be non-empty")]
+    #[error(\"control domain must be non-empty\")]
     EmptyDomain,
 
-    #[error("control challenge expired at {expiry}, now {now}")]
+    #[error(\"control challenge expired at {expiry}, now {now}\")]
     ChallengeExpired { expiry: u64, now: u64 },
 
-    #[error("challenge issued in future: issued_at {issued_at}, now {now}")]
+    #[error(\"challenge issued in future: issued_at {issued_at}, now {now}\")]
     ChallengeIssuedInFuture { issued_at: u64, now: u64 },
 
-    #[error("control domain mismatch: expected {expected:?}, got {got:?}")]
+    #[error(\"control domain mismatch: expected {expected:?}, got {got:?}\")]
     DomainMismatch { expected: Vec<u8>, got: Vec<u8> },
 
-    #[error("nonce mismatch: expected {expected:?}, got {got:?}")]
+    #[error(\"nonce mismatch: expected {expected:?}, got {got:?}\")]
     NonceMismatch { expected: [u8; 32], got: [u8; 32] },
 
-    #[error("receiver mismatch: challenge {challenge:?} vs response {response:?}")]
+    #[error(\"receiver mismatch: challenge {challenge:?} vs response {response:?}\")]
     ReceiverMismatch {
         challenge: OrchardReceiverBytes,
         response: OrchardReceiverBytes,
     },
 
-    #[error("receiver not approved: expected {expected:?}, got {got:?}")]
+    #[error(\"trade commitment mismatch: challenge {challenge} vs response {response}\")]
+    TradeCommitmentMismatch {
+        challenge: TradeCommitment,
+        response: TradeCommitment,
+    },
+
+    #[error(\"trade commitment mismatch: expected {expected}, got {got}\")]
+    ChallengeTradeCommitmentMismatch {
+        expected: TradeCommitment,
+        got: TradeCommitment,
+    },
+
+    #[error(\"receiver not approved: expected {expected:?}, got {got:?}\")]
     ApprovedReceiverMismatch {
         expected: OrchardReceiverBytes,
         got: OrchardReceiverBytes,
     },
 
-    #[error("control key not approved for receiver {receiver:?}")]
+    #[error(\"control key not approved for receiver {receiver:?}\")]
     ControlKeyNotApproved { receiver: OrchardReceiverBytes },
 
-    #[error("invalid Ed25519 control signature: {reason}")]
+    #[error(\"invalid Ed25519 control signature: {reason}\")]
     InvalidSignature { reason: String },
 
-    #[error("signature verification failed for receiver {receiver:?}")]
+    #[error(\"signature verification failed for receiver {receiver:?}\")]
     SignatureVerificationFailed { receiver: OrchardReceiverBytes },
 
-    #[error("trade expiry {trade_expiry} beyond control challenge expiry {challenge_expiry}")]
+    #[error(\"trade expiry {trade_expiry} beyond control challenge expiry {challenge_expiry}\")]
     TradeExpiryBeyondChallengeExpiry {
         trade_expiry: u64,
         challenge_expiry: u64,
     },
+
+    #[error(\"recipient control verifier unconfigured — fail-closed\")]
+    Unconfigured,
+}
+
+/// Opaque trait for recipient-control verification — Vikram V4 boundary.
+///
+/// Production implementations must be fail-closed. `UnconfiguredControlVerifier`
+/// returns `Unconfigured` error. Real Ed25519 path is `RecipientControlAuthenticator`.
+/// Test-only fake is `FakeControlVerifier` behind `#[cfg(test)]`.
+pub trait RecipientControlVerifier {
+    /// Verifies control proof for a challenge at `now`.
+    fn verify(
+        &self,
+        challenge: &RecipientControlChallenge,
+        response: &RecipientControlResponse,
+        now: UnixSeconds,
+    ) -> Result<VerifiedRecipientControl, ControlError>;
+}
+
+/// Production fail-closed verifier — returns Unconfigured if used without real keys.
+///
+/// This is the default when no authenticator is configured. It ensures
+/// the matcher blocks trades rather than allowing them when control verification
+/// is not set up.
+#[derive(Debug, Clone, Default)]
+pub struct UnconfiguredControlVerifier;
+
+impl RecipientControlVerifier for UnconfiguredControlVerifier {
+    fn verify(
+        &self,
+        _challenge: &RecipientControlChallenge,
+        _response: &RecipientControlResponse,
+        _now: UnixSeconds,
+    ) -> Result<VerifiedRecipientControl, ControlError> {
+        Err(ControlError::Unconfigured)
+    }
 }
 
 /// Authenticates live wallet control of an approved Orchard receiver.
+///
+/// Implements `RecipientControlVerifier` trait for production use.
 #[derive(Debug, Clone)]
 pub struct RecipientControlAuthenticator {
     /// Map of approved receiver → control verifying key.
@@ -327,84 +420,6 @@ impl RecipientControlAuthenticator {
     #[must_use]
     pub fn expected_domain(&self) -> &[u8] {
         &self.expected_domain
-    }
-
-    /// Verifies control proof for a challenge at `now`.
-    ///
-    /// Enforces:
-    /// - challenge not expired, not issued in future
-    /// - domain == expected_domain
-    /// - response nonce == challenge nonce
-    /// - response receiver == challenge receiver
-    /// - control key approved for receiver
-    /// - Ed25519 signature over `challenge.canonical_bytes()`
-    ///
-    /// # Errors
-    ///
-    /// Returns `ControlError` for any rejection.
-    pub fn verify(
-        &self,
-        challenge: &RecipientControlChallenge,
-        response: &RecipientControlResponse,
-        now: UnixSeconds,
-    ) -> Result<VerifiedRecipientControl, ControlError> {
-        // 1. Freshness: issued_at <= now <= expiry
-        if challenge.is_expired_at(now) {
-            return Err(ControlError::ChallengeExpired {
-                expiry: challenge.expiry().get(),
-                now: now.get(),
-            });
-        }
-        if challenge.issued_at().get() > now.get() {
-            return Err(ControlError::ChallengeIssuedInFuture {
-                issued_at: challenge.issued_at().get(),
-                now: now.get(),
-            });
-        }
-
-        // 2. Domain binding.
-        if challenge.domain() != self.expected_domain.as_slice() {
-            return Err(ControlError::DomainMismatch {
-                expected: self.expected_domain.clone(),
-                got: challenge.domain().to_vec(),
-            });
-        }
-
-        // 3. Nonce match — prevents replay of old response for new challenge.
-        if response.nonce() != challenge.nonce() {
-            return Err(ControlError::NonceMismatch {
-                expected: *challenge.nonce(),
-                got: *response.nonce(),
-            });
-        }
-
-        // 4. Receiver match — response must be for same receiver as challenge.
-        if response.receiver() != challenge.receiver() {
-            return Err(ControlError::ReceiverMismatch {
-                challenge: *challenge.receiver(),
-                response: *response.receiver(),
-            });
-        }
-
-        // 5. Control key approved for this receiver.
-        let vk = self
-            .approved_control_keys
-            .get(challenge.receiver())
-            .ok_or_else(|| ControlError::ControlKeyNotApproved {
-                receiver: *challenge.receiver(),
-            })?;
-
-        // 6. Signature verification over frozen canonical bytes.
-        let sig = Signature::from_bytes(response.signature());
-        vk.verify(&challenge.canonical_bytes(), &sig)
-            .map_err(|_| ControlError::SignatureVerificationFailed {
-                receiver: *challenge.receiver(),
-            })?;
-
-        Ok(VerifiedRecipientControl {
-            receiver: *challenge.receiver(),
-            receiver_commitment: challenge.receiver_commitment(),
-        })
     }
 
     /// Verifies control and additionally checks against authority-approved receiver.
@@ -457,6 +472,160 @@ impl RecipientControlAuthenticator {
         }
         Ok(())
     }
+
+    /// Checks that challenge's trade_commitment matches expected trade commitment.
+    ///
+    /// Prevents challenge replay across different trades.
+    pub fn check_trade_commitment(
+        expected: TradeCommitment,
+        challenge: &RecipientControlChallenge,
+    ) -> Result<(), ControlError> {
+        if challenge.trade_commitment() != expected {
+            return Err(ControlError::ChallengeTradeCommitmentMismatch {
+                expected,
+                got: challenge.trade_commitment(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl RecipientControlVerifier for RecipientControlAuthenticator {
+    /// Verifies control proof for a challenge at `now`.
+    ///
+    /// Enforces:
+    /// - challenge not expired, not issued in future
+    /// - domain == expected_domain
+    /// - response nonce == challenge nonce
+    /// - response receiver == challenge receiver
+    /// - response trade_commitment == challenge trade_commitment
+    /// - control key approved for receiver
+    /// - Ed25519 signature over `challenge.canonical_bytes()` which includes trade_commitment
+    ///
+    /// # Errors
+    ///
+    /// Returns `ControlError` for any rejection.
+    fn verify(
+        &self,
+        challenge: &RecipientControlChallenge,
+        response: &RecipientControlResponse,
+        now: UnixSeconds,
+    ) -> Result<VerifiedRecipientControl, ControlError> {
+        // 1. Freshness: issued_at <= now <= expiry
+        if challenge.is_expired_at(now) {
+            return Err(ControlError::ChallengeExpired {
+                expiry: challenge.expiry().get(),
+                now: now.get(),
+            });
+        }
+        if challenge.issued_at().get() > now.get() {
+            return Err(ControlError::ChallengeIssuedInFuture {
+                issued_at: challenge.issued_at().get(),
+                now: now.get(),
+            });
+        }
+
+        // 2. Domain binding.
+        if challenge.domain() != self.expected_domain.as_slice() {
+            return Err(ControlError::DomainMismatch {
+                expected: self.expected_domain.clone(),
+                got: challenge.domain().to_vec(),
+            });
+        }
+
+        // 3. Nonce match — prevents replay of old response for new challenge.
+        if response.nonce() != challenge.nonce() {
+            return Err(ControlError::NonceMismatch {
+                expected: *challenge.nonce(),
+                got: *response.nonce(),
+            });
+        }
+
+        // 4. Receiver match — response must be for same receiver as challenge.
+        if response.receiver() != challenge.receiver() {
+            return Err(ControlError::ReceiverMismatch {
+                challenge: *challenge.receiver(),
+                response: *response.receiver(),
+            });
+        }
+
+        // 5. Trade commitment match — response must be for same trade as challenge.
+        if response.trade_commitment() != challenge.trade_commitment() {
+            return Err(ControlError::TradeCommitmentMismatch {
+                challenge: challenge.trade_commitment(),
+                response: response.trade_commitment(),
+            });
+        }
+
+        // 6. Control key approved for this receiver.
+        let vk = self
+            .approved_control_keys
+            .get(challenge.receiver())
+            .ok_or_else(|| ControlError::ControlKeyNotApproved {
+                receiver: *challenge.receiver(),
+            })?;
+
+        // 7. Signature verification over frozen canonical bytes (includes trade_commitment).
+        let sig = Signature::from_bytes(response.signature());
+        vk.verify(&challenge.canonical_bytes(), &sig)
+            .map_err(|_| ControlError::SignatureVerificationFailed {
+                receiver: *challenge.receiver(),
+            })?;
+
+        Ok(VerifiedRecipientControl {
+            receiver: *challenge.receiver(),
+            receiver_commitment: challenge.receiver_commitment(),
+            trade_commitment: challenge.trade_commitment(),
+        })
+    }
+}
+
+/// Test-only fake verifier — always passes, behind #[cfg(test)].
+///
+/// Never reachable in production. Used for unit tests that don't need real crypto.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub struct FakeControlVerifier;
+
+#[cfg(test)]
+impl RecipientControlVerifier for FakeControlVerifier {
+    fn verify(
+        &self,
+        challenge: &RecipientControlChallenge,
+        response: &RecipientControlResponse,
+        now: UnixSeconds,
+    ) -> Result<VerifiedRecipientControl, ControlError> {
+        // Minimal checks to still enforce freshness and domain and nonce, but skip signature
+        if challenge.is_expired_at(now) {
+            return Err(ControlError::ChallengeExpired {
+                expiry: challenge.expiry().get(),
+                now: now.get(),
+            });
+        }
+        if response.nonce() != challenge.nonce() {
+            return Err(ControlError::NonceMismatch {
+                expected: *challenge.nonce(),
+                got: *response.nonce(),
+            });
+        }
+        if response.receiver() != challenge.receiver() {
+            return Err(ControlError::ReceiverMismatch {
+                challenge: *challenge.receiver(),
+                response: *response.receiver(),
+            });
+        }
+        if response.trade_commitment() != challenge.trade_commitment() {
+            return Err(ControlError::TradeCommitmentMismatch {
+                challenge: challenge.trade_commitment(),
+                response: response.trade_commitment(),
+            });
+        }
+        Ok(VerifiedRecipientControl {
+            receiver: *challenge.receiver(),
+            receiver_commitment: challenge.receiver_commitment(),
+            trade_commitment: challenge.trade_commitment(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -464,11 +633,16 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use zwa_protocol::numbers::UnixSeconds;
+    use zwa_protocol::TradeCommitment;
 
     const RECEIVER_A: &str =
-        "781671f8a41294c866d8161f3bf5f84a8fd2c328f91a2d085a66036acd59439731c36c4f1b99b4d64be233";
+        \"781671f8a41294c866d8161f3bf5f84a8fd2c328f91a2d085a66036acd59439731c36c4f1b99b4d64be233\";
     const RECEIVER_B: &str =
-        "ba5a9b6828e14d720cc41e998917f5996635d1a7fa84448cb118f7b6f65068d380099e5cd54d98dd3917bb";
+        \"ba5a9b6828e14d720cc41e998917f5996635d1a7fa84448cb118f7b6f65068d380099e5cd54d98dd3917bb\";
+    const TRADE_COMMITMENT: &str =
+        \"10187400613857124614980227259922066295752635539032972479692659299555113110306\";
+    const OTHER_COMMITMENT: &str =
+        \"7409670081847436957289371955571360481923983184454289247710022466448715682310\";
 
     fn signing_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
@@ -482,11 +656,20 @@ mod tests {
         OrchardReceiverBytes::from_hex(RECEIVER_B).unwrap()
     }
 
+    fn trade_commitment() -> TradeCommitment {
+        TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap()
+    }
+
+    fn other_commitment() -> TradeCommitment {
+        TradeCommitment::from_decimal_str(OTHER_COMMITMENT).unwrap()
+    }
+
     fn challenge_for(
         receiver: OrchardReceiverBytes,
         nonce: [u8; 32],
         issued_at: u64,
         expiry: u64,
+        commitment: TradeCommitment,
     ) -> RecipientControlChallenge {
         RecipientControlChallenge::new(
             receiver,
@@ -494,6 +677,7 @@ mod tests {
             CONTROL_DOMAIN.to_vec(),
             UnixSeconds::new(issued_at),
             UnixSeconds::new(expiry),
+            commitment,
         )
         .unwrap()
     }
@@ -509,7 +693,7 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [7u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300);
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
         let response = RecipientControlResponse::sign(&challenge, &sk);
 
         let now = UnixSeconds::new(1_900_000_100);
@@ -519,6 +703,7 @@ mod tests {
             verified.receiver_commitment(),
             receiver_commitment(&recv_a)
         );
+        assert_eq!(verified.trade_commitment(), trade_commitment());
 
         // Also passes against approved receiver check (Phase 1B binding).
         let verified2 = auth
@@ -541,7 +726,7 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [8u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300);
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
         let response = RecipientControlResponse::sign(&challenge, &sk);
 
         let now = UnixSeconds::new(1_900_000_100);
@@ -550,7 +735,7 @@ mod tests {
             ControlError::ControlKeyNotApproved { receiver } => {
                 assert_eq!(receiver, recv_a);
             }
-            other => panic!("expected ControlKeyNotApproved, got {other:?}"),
+            other => panic!(\"expected ControlKeyNotApproved, got {other:?}\"),
         }
     }
 
@@ -573,9 +758,9 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [9u8; 32];
-        let challenge_a = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300);
+        let challenge_a = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
         let response_b = RecipientControlResponse::sign(
-            &challenge_for(recv_b, nonce, 1_900_000_000, 1_900_000_300),
+            &challenge_for(recv_b, nonce, 1_900_000_000, 1_900_000_300, trade_commitment()),
             &sk_b,
         );
 
@@ -583,24 +768,25 @@ mod tests {
 
         // Nonce matches but receiver mismatches between challenge and response.
         // Use challenge A, response B with same nonce — receiver mismatch.
-        let response_b_same_nonce = RecipientControlResponse::new(nonce, recv_b, response_b.signature);
+        let response_b_same_nonce =
+            RecipientControlResponse::new(nonce, recv_b, trade_commitment(), response_b.signature);
         let err = auth
             .verify(&challenge_a, &response_b_same_nonce, now)
             .unwrap_err();
         match err {
             ControlError::ReceiverMismatch { .. } => {}
-            other => panic!("expected ReceiverMismatch, got {other:?}"),
+            other => panic!(\"expected ReceiverMismatch, got {other:?}\"),
         }
 
         // Approved receiver check: credential approves A, but challenge is for B → blocked.
-        let challenge_b = challenge_for(recv_b, nonce, 1_900_000_000, 1_900_000_300);
+        let challenge_b = challenge_for(recv_b, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
         let response_b2 = RecipientControlResponse::sign(&challenge_b, &sk_b);
         let err = auth
             .verify_against_approved_receiver(&challenge_b, &response_b2, &recv_a, now)
             .unwrap_err();
         match err {
             ControlError::ApprovedReceiverMismatch { .. } => {}
-            other => panic!("expected ApprovedReceiverMismatch, got {other:?}"),
+            other => panic!(\"expected ApprovedReceiverMismatch, got {other:?}\"),
         }
     }
 
@@ -614,7 +800,7 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [10u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_100);
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_100, trade_commitment());
         let response = RecipientControlResponse::sign(&challenge, &sk);
 
         // Expired.
@@ -627,7 +813,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::ChallengeExpired { .. } => {}
-            other => panic!("expected ChallengeExpired, got {other:?}"),
+            other => panic!(\"expected ChallengeExpired, got {other:?}\"),
         }
 
         // Issued in future.
@@ -640,7 +826,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::ChallengeIssuedInFuture { .. } => {}
-            other => panic!("expected ChallengeIssuedInFuture, got {other:?}"),
+            other => panic!(\"expected ChallengeIssuedInFuture, got {other:?}\"),
         }
 
         // Nonce mismatch.
@@ -655,16 +841,17 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::NonceMismatch { .. } => {}
-            other => panic!("expected NonceMismatch, got {other:?}"),
+            other => panic!(\"expected NonceMismatch, got {other:?}\"),
         }
 
         // Domain mismatch.
         let bad_domain_challenge = RecipientControlChallenge::new(
             recv_a,
             nonce,
-            b"WRONG-DOMAIN".to_vec(),
+            b\"WRONG-DOMAIN\".to_vec(),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(1_900_000_100),
+            trade_commitment(),
         )
         .unwrap();
         let bad_domain_response = RecipientControlResponse::sign(&bad_domain_challenge, &sk);
@@ -677,7 +864,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::DomainMismatch { .. } => {}
-            other => panic!("expected DomainMismatch, got {other:?}"),
+            other => panic!(\"expected DomainMismatch, got {other:?}\"),
         }
     }
 
@@ -691,7 +878,7 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [11u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_100);
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_100, trade_commitment());
         let mut response = RecipientControlResponse::sign(&challenge, &sk);
         // Tamper signature.
         response.signature[0] ^= 1;
@@ -705,7 +892,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::SignatureVerificationFailed { .. } => {}
-            other => panic!("expected SignatureVerificationFailed, got {other:?}"),
+            other => panic!(\"expected SignatureVerificationFailed, got {other:?}\"),
         }
 
         // Trade expiry beyond challenge expiry.
@@ -720,7 +907,7 @@ mod tests {
                 assert_eq!(te, 1_900_000_200);
                 assert_eq!(ce, 1_900_000_100);
             }
-            other => panic!("expected TradeExpiryBeyondChallengeExpiry, got {other:?}"),
+            other => panic!(\"expected TradeExpiryBeyondChallengeExpiry, got {other:?}\"),
         }
     }
 
@@ -728,18 +915,119 @@ mod tests {
     fn canonical_bytes_include_all_fields() {
         let recv_a = receiver_a();
         let nonce = [12u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300);
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
         let bytes = challenge.canonical_bytes();
-        // domain || nonce || issued_at BE || expiry BE || receiver 43B
+        // domain || nonce || issued_at BE || expiry BE || receiver 43B || trade_commitment 32B
         assert!(bytes.starts_with(CONTROL_DOMAIN));
         assert_eq!(
             bytes.len(),
-            CONTROL_DOMAIN.len() + 32 + 8 + 8 + recv_a.as_bytes().len()
+            CONTROL_DOMAIN.len() + 32 + 8 + 8 + recv_a.as_bytes().len() + 32
         );
         // Changing any field changes canonical bytes.
         let mut other_nonce = nonce;
         other_nonce[0] ^= 1;
-        let challenge2 = challenge_for(recv_a, other_nonce, 1_900_000_000, 1_900_000_300);
+        let challenge2 = challenge_for(
+            recv_a,
+            other_nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         assert_ne!(challenge.canonical_bytes(), challenge2.canonical_bytes());
+
+        // Changing trade commitment changes canonical bytes
+        let challenge3 = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, other_commitment());
+        assert_ne!(challenge.canonical_bytes(), challenge3.canonical_bytes());
+    }
+
+    #[test]
+    fn trade_commitment_binding_enforced() {
+        let sk = signing_key(7);
+        let vk = sk.verifying_key();
+        let recv_a = receiver_a();
+        let mut approved = BTreeMap::new();
+        approved.insert(recv_a, vk);
+        let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
+
+        let nonce = [13u8; 32];
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let response = RecipientControlResponse::sign(&challenge, &sk);
+
+        // Valid
+        let now = UnixSeconds::new(1_900_000_100);
+        assert!(auth.verify(&challenge, &response, now).is_ok());
+
+        // Response with different trade commitment should fail
+        let bad_response = RecipientControlResponse::new(
+            nonce,
+            recv_a,
+            other_commitment(),
+            response.signature,
+        );
+        let err = auth.verify(&challenge, &bad_response, now).unwrap_err();
+        match err {
+            ControlError::TradeCommitmentMismatch { .. } => {}
+            other => panic!(\"expected TradeCommitmentMismatch, got {other:?}\"),
+        }
+
+        // Challenge trade commitment mismatch vs expected
+        let err = RecipientControlAuthenticator::check_trade_commitment(other_commitment(), &challenge)
+            .unwrap_err();
+        match err {
+            ControlError::ChallengeTradeCommitmentMismatch { .. } => {}
+            other => panic!(\"expected ChallengeTradeCommitmentMismatch, got {other:?}\"),
+        }
+    }
+
+    #[test]
+    fn unconfigured_verifier_fail_closed() {
+        let recv_a = receiver_a();
+        let nonce = [14u8; 32];
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let response = RecipientControlResponse::new(nonce, recv_a, trade_commitment(), [0u8; 64]);
+
+        let unconfigured = UnconfiguredControlVerifier;
+        let err = unconfigured
+            .verify(&challenge, &response, UnixSeconds::new(1_900_000_100))
+            .unwrap_err();
+        match err {
+            ControlError::Unconfigured => {}
+            other => panic!(\"expected Unconfigured, got {other:?}\"),
+        }
+    }
+
+    #[test]
+    fn fake_verifier_only_in_test() {
+        let recv_a = receiver_a();
+        let nonce = [15u8; 32];
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let response = RecipientControlResponse::new(nonce, recv_a, trade_commitment(), [0u8; 64]);
+
+        let fake = FakeControlVerifier;
+        let verified = fake
+            .verify(&challenge, &response, UnixSeconds::new(1_900_000_100))
+            .unwrap();
+        assert_eq!(verified.receiver(), &recv_a);
+        assert_eq!(verified.trade_commitment(), trade_commitment());
+    }
+
+    #[test]
+    fn trait_object_works_for_vikram_v4() {
+        // Ensure trait can be used as dyn object
+        let sk = signing_key(8);
+        let vk = sk.verifying_key();
+        let recv_a = receiver_a();
+        let mut approved = BTreeMap::new();
+        approved.insert(recv_a, vk);
+        let real_auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
+
+        let boxed: Box<dyn RecipientControlVerifier> = Box::new(real_auth);
+        let nonce = [16u8; 32];
+        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let response = RecipientControlResponse::sign(&challenge, &sk);
+        let verified = boxed
+            .verify(&challenge, &response, UnixSeconds::new(1_900_000_100))
+            .unwrap();
+        assert_eq!(verified.receiver(), &recv_a);
     }
 }

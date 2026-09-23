@@ -112,7 +112,7 @@ use zwa_protocol::numbers::UnixSeconds;
 use std::collections::BTreeMap;
 
 let challenge = RecipientControlChallenge::new_random(
-    approved_receiver, now, 300, CONTROL_DOMAIN.to_vec()
+    approved_receiver, trade_commitment, now, 300, CONTROL_DOMAIN.to_vec()
 )?;
 let response = RecipientControlResponse::sign(&challenge, &control_signing_key);
 
@@ -125,10 +125,13 @@ Enforces:
 - Domain binding: `domain == CONTROL_DOMAIN` (frozen `ZWA-RECIPIENT-CTRL-V1`)
 - Nonce match: response nonce == challenge nonce (replay prevention)
 - Receiver match: response receiver == challenge receiver
+- Trade commitment binding: `domain||nonce||issued_at||expiry||receiver||trade_commitment` (A5) — prevents challenge replay across trades
 - Approved receiver match: challenge receiver == `ActiveCredential.approved_receiver` (Phase 1B)
 - Control key approved: `BTreeMap<OrchardReceiverBytes, VerifyingKey>` registry — venue registers which Ed25519 control key controls which receiver. Separation: approval ≠ control.
-- Ed25519 sig over canonical bytes: `domain || nonce || issued_at BE || expiry BE || receiver 43B`
+- Ed25519 sig over canonical bytes: `domain || nonce || issued_at BE || expiry BE || receiver 43B || trade_commitment 32B`
 - Trade expiry ≤ challenge expiry via `check_trade_expiry`
+- Trade commitment equality via `check_trade_commitment`
+- Fail-closed: `UnconfiguredControlVerifier` returns `Unconfigured` error, trait `RecipientControlVerifier` is opaque boundary for Vikram V4, test-only `FakeControlVerifier` behind `#[cfg(test)]`
 
 Tests: valid control pass, approved without control BLOCK (`ControlKeyNotApproved`), same credential different receiver FAIL (`ReceiverMismatch`, `ApprovedReceiverMismatch`), expiry/nonce/domain/sig enforcement, canonical bytes include all fields.
 

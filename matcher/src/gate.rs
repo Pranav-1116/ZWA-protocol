@@ -223,6 +223,13 @@ impl<P: ReplayPersistence> MatcherGate<P> {
         )
         .map_err(GateRejection::Control)?;
 
+        // 5b: Trade commitment binding — challenge must be bound to this trade
+        RecipientControlAuthenticator::check_trade_commitment(
+            checked_trade.commitment(),
+            &input.control_challenge,
+        )
+        .map_err(GateRejection::Control)?;
+
         let verified_control = self
             .control_authenticator
             .verify_against_approved_receiver(
@@ -469,7 +476,9 @@ mod tests {
             CONTROL_DOMAIN.to_vec(),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(1_900_000_300),
-        ).unwrap();
+            commitment,
+        )
+        .unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
 
         let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
@@ -532,12 +541,14 @@ mod tests {
         let (mut input, gate) = valid_gate_input();
         let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
         // Challenge for B, but approved is A
+        let commitment_b = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
         let challenge_b = RecipientControlChallenge::new(
             recv_b,
             [8u8; 32],
             CONTROL_DOMAIN.to_vec(),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(1_900_000_300),
+            commitment_b,
         ).unwrap();
         let sk_b = signing_key(9);
         let response_b = RecipientControlResponse::sign(&challenge_b, &sk_b);

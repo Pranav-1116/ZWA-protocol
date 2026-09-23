@@ -49,8 +49,11 @@ pub mod verifiers;
 pub use checked::CheckedTrade;
 pub use control::{
     RecipientControlAuthenticator, RecipientControlChallenge, RecipientControlResponse,
-    VerifiedRecipientControl, CONTROL_DOMAIN, DEFAULT_CONTROL_TTL_SECONDS, ControlError,
+    RecipientControlVerifier, UnconfiguredControlVerifier, VerifiedRecipientControl,
+    CONTROL_DOMAIN, DEFAULT_CONTROL_TTL_SECONDS, ControlError,
 };
+#[cfg(test)]
+pub use control::FakeControlVerifier;
 pub use gate::{GateInput, GateRejection, MatcherGate, VerifiedTrade};
 pub use replay::{
     InMemoryPersistence, JsonFilePersistence, PersistentReplayStore, ReplayPersistence,
