@@ -1,0 +1,25 @@
+[package]
+name = "zwa-settlement"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Pranav-1116/ZWA-protocol"
+description = "Phase 3 settlement adapter for ZWA Protocol — V1 opaque boundary. Takes MatcherApproval only, enforces non-custodial seller/buyer independent authorization. Imports frozen crates + matcher only."
+
+[dependencies]
+zwa-matcher = { path = "../../matcher", version = "0.1.0" }
+zwa-protocol = { path = "../protocol", version = "0.1.0" }
+thiserror = { workspace = true }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+getrandom = "0.2"
+sha2 = { workspace = true }
+hex = "0.4.3"
+
+[dev-dependencies]
+zwa-matcher = { path = "../../matcher", version = "0.1.0" }
+zwa-protocol = { path = "../protocol", version = "0.1.0" }
+zwa-credentials = { path = "../credentials", version = "0.1.0" }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+
+[lints]
+workspace = true
