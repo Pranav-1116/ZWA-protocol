@@ -292,64 +292,64 @@ impl VerifiedRecipientControl {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ControlError {
-    #[error(\"invalid challenge window: issued_at {issued_at} > expiry {expiry}\")]
+    #[error("invalid challenge window: issued_at {issued_at} > expiry {expiry}")]
     InvalidWindow { issued_at: u64, expiry: u64 },
 
-    #[error(\"control domain must be non-empty\")]
+    #[error("control domain must be non-empty")]
     EmptyDomain,
 
-    #[error(\"control challenge expired at {expiry}, now {now}\")]
+    #[error("control challenge expired at {expiry}, now {now}")]
     ChallengeExpired { expiry: u64, now: u64 },
 
-    #[error(\"challenge issued in future: issued_at {issued_at}, now {now}\")]
+    #[error("challenge issued in future: issued_at {issued_at}, now {now}")]
     ChallengeIssuedInFuture { issued_at: u64, now: u64 },
 
-    #[error(\"control domain mismatch: expected {expected:?}, got {got:?}\")]
+    #[error("control domain mismatch: expected {expected:?}, got {got:?}")]
     DomainMismatch { expected: Vec<u8>, got: Vec<u8> },
 
-    #[error(\"nonce mismatch: expected {expected:?}, got {got:?}\")]
+    #[error("nonce mismatch: expected {expected:?}, got {got:?}")]
     NonceMismatch { expected: [u8; 32], got: [u8; 32] },
 
-    #[error(\"receiver mismatch: challenge {challenge:?} vs response {response:?}\")]
+    #[error("receiver mismatch: challenge {challenge:?} vs response {response:?}")]
     ReceiverMismatch {
         challenge: OrchardReceiverBytes,
         response: OrchardReceiverBytes,
     },
 
-    #[error(\"trade commitment mismatch: challenge {challenge} vs response {response}\")]
+    #[error("trade commitment mismatch: challenge {challenge} vs response {response}")]
     TradeCommitmentMismatch {
         challenge: TradeCommitment,
         response: TradeCommitment,
     },
 
-    #[error(\"trade commitment mismatch: expected {expected}, got {got}\")]
+    #[error("trade commitment mismatch: expected {expected}, got {got}")]
     ChallengeTradeCommitmentMismatch {
         expected: TradeCommitment,
         got: TradeCommitment,
     },
 
-    #[error(\"receiver not approved: expected {expected:?}, got {got:?}\")]
+    #[error("receiver not approved: expected {expected:?}, got {got:?}")]
     ApprovedReceiverMismatch {
         expected: OrchardReceiverBytes,
         got: OrchardReceiverBytes,
     },
 
-    #[error(\"control key not approved for receiver {receiver:?}\")]
+    #[error("control key not approved for receiver {receiver:?}")]
     ControlKeyNotApproved { receiver: OrchardReceiverBytes },
 
-    #[error(\"invalid Ed25519 control signature: {reason}\")]
+    #[error("invalid Ed25519 control signature: {reason}")]
     InvalidSignature { reason: String },
 
-    #[error(\"signature verification failed for receiver {receiver:?}\")]
+    #[error("signature verification failed for receiver {receiver:?}")]
     SignatureVerificationFailed { receiver: OrchardReceiverBytes },
 
-    #[error(\"trade expiry {trade_expiry} beyond control challenge expiry {challenge_expiry}\")]
+    #[error("trade expiry {trade_expiry} beyond control challenge expiry {challenge_expiry}")]
     TradeExpiryBeyondChallengeExpiry {
         trade_expiry: u64,
         challenge_expiry: u64,
     },
 
-    #[error(\"recipient control verifier unconfigured — fail-closed\")]
+    #[error("recipient control verifier unconfigured — fail-closed")]
     Unconfigured,
 }
 
@@ -636,13 +636,13 @@ mod tests {
     use zwa_protocol::TradeCommitment;
 
     const RECEIVER_A: &str =
-        \"781671f8a41294c866d8161f3bf5f84a8fd2c328f91a2d085a66036acd59439731c36c4f1b99b4d64be233\";
+        "781671f8a41294c866d8161f3bf5f84a8fd2c328f91a2d085a66036acd59439731c36c4f1b99b4d64be233";
     const RECEIVER_B: &str =
-        \"ba5a9b6828e14d720cc41e998917f5996635d1a7fa84448cb118f7b6f65068d380099e5cd54d98dd3917bb\";
+        "ba5a9b6828e14d720cc41e998917f5996635d1a7fa84448cb118f7b6f65068d380099e5cd54d98dd3917bb";
     const TRADE_COMMITMENT: &str =
-        \"10187400613857124614980227259922066295752635539032972479692659299555113110306\";
+        "10187400613857124614980227259922066295752635539032972479692659299555113110306";
     const OTHER_COMMITMENT: &str =
-        \"7409670081847436957289371955571360481923983184454289247710022466448715682310\";
+        "7409670081847436957289371955571360481923983184454289247710022466448715682310";
 
     fn signing_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
@@ -735,7 +735,7 @@ mod tests {
             ControlError::ControlKeyNotApproved { receiver } => {
                 assert_eq!(receiver, recv_a);
             }
-            other => panic!(\"expected ControlKeyNotApproved, got {other:?}\"),
+            other => panic!("expected ControlKeyNotApproved, got {other:?}"),
         }
     }
 
@@ -775,7 +775,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::ReceiverMismatch { .. } => {}
-            other => panic!(\"expected ReceiverMismatch, got {other:?}\"),
+            other => panic!("expected ReceiverMismatch, got {other:?}"),
         }
 
         // Approved receiver check: credential approves A, but challenge is for B → blocked.
@@ -786,7 +786,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::ApprovedReceiverMismatch { .. } => {}
-            other => panic!(\"expected ApprovedReceiverMismatch, got {other:?}\"),
+            other => panic!("expected ApprovedReceiverMismatch, got {other:?}"),
         }
     }
 
@@ -813,7 +813,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::ChallengeExpired { .. } => {}
-            other => panic!(\"expected ChallengeExpired, got {other:?}\"),
+            other => panic!("expected ChallengeExpired, got {other:?}"),
         }
 
         // Issued in future.
@@ -826,7 +826,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::ChallengeIssuedInFuture { .. } => {}
-            other => panic!(\"expected ChallengeIssuedInFuture, got {other:?}\"),
+            other => panic!("expected ChallengeIssuedInFuture, got {other:?}"),
         }
 
         // Nonce mismatch.
@@ -841,14 +841,14 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::NonceMismatch { .. } => {}
-            other => panic!(\"expected NonceMismatch, got {other:?}\"),
+            other => panic!("expected NonceMismatch, got {other:?}"),
         }
 
         // Domain mismatch.
         let bad_domain_challenge = RecipientControlChallenge::new(
             recv_a,
             nonce,
-            b\"WRONG-DOMAIN\".to_vec(),
+            b"WRONG-DOMAIN".to_vec(),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(1_900_000_100),
             trade_commitment(),
@@ -864,7 +864,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::DomainMismatch { .. } => {}
-            other => panic!(\"expected DomainMismatch, got {other:?}\"),
+            other => panic!("expected DomainMismatch, got {other:?}"),
         }
     }
 
@@ -892,7 +892,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::SignatureVerificationFailed { .. } => {}
-            other => panic!(\"expected SignatureVerificationFailed, got {other:?}\"),
+            other => panic!("expected SignatureVerificationFailed, got {other:?}"),
         }
 
         // Trade expiry beyond challenge expiry.
@@ -907,7 +907,7 @@ mod tests {
                 assert_eq!(te, 1_900_000_200);
                 assert_eq!(ce, 1_900_000_100);
             }
-            other => panic!(\"expected TradeExpiryBeyondChallengeExpiry, got {other:?}\"),
+            other => panic!("expected TradeExpiryBeyondChallengeExpiry, got {other:?}"),
         }
     }
 
@@ -967,7 +967,7 @@ mod tests {
         let err = auth.verify(&challenge, &bad_response, now).unwrap_err();
         match err {
             ControlError::TradeCommitmentMismatch { .. } => {}
-            other => panic!(\"expected TradeCommitmentMismatch, got {other:?}\"),
+            other => panic!("expected TradeCommitmentMismatch, got {other:?}"),
         }
 
         // Challenge trade commitment mismatch vs expected
@@ -975,7 +975,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::ChallengeTradeCommitmentMismatch { .. } => {}
-            other => panic!(\"expected ChallengeTradeCommitmentMismatch, got {other:?}\"),
+            other => panic!("expected ChallengeTradeCommitmentMismatch, got {other:?}"),
         }
     }
 
@@ -992,7 +992,7 @@ mod tests {
             .unwrap_err();
         match err {
             ControlError::Unconfigured => {}
-            other => panic!(\"expected Unconfigured, got {other:?}\"),
+            other => panic!("expected Unconfigured, got {other:?}"),
         }
     }
 
