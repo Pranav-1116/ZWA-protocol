@@ -1,0 +1,45 @@
+[package]
+name = "zwa-matcher"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Maheshsiddu29/ZWA-Protocol"
+description = "Matcher gate for ZWA Protocol - checked intent/commitment, root authentication, replay coordination, and proof gating. Imports frozen Phase 1 crates only."
+
+[dependencies]
+zwa-protocol = { path = "../crates/protocol", version = "0.1.0" }
+zwa-commitments = { path = "../crates/commitments", version = "0.1.0" }
+zwa-credentials = { path = "../crates/credentials", version = "0.1.0" }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ark-bn254 = { version = "0.5.0", features = ["std", "scalar_field"] }
+ark-ff = { version = "0.5.0", features = ["std"] }
+ark-ec = { version = "0.5.0", features = ["std"] }
+ark-groth16 = { version = "0.5.0", features = ["std"] }
+ark-serialize = { version = "0.5.0", features = ["std"] }
+ark-std = { version = "0.5.0", features = ["std"] }
+sha2 = { workspace = true }
+num-bigint = "0.4.6"
+hex = "0.4.3"
+
+[dev-dependencies]
+zwa-protocol = { path = "../crates/protocol", version = "0.1.0" }
+zwa-commitments = { path = "../crates/commitments", version = "0.1.0" }
+zwa-credentials = { path = "../crates/credentials", version = "0.1.0" }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { workspace = true }
+ark-bn254 = { version = "0.5.0", features = ["std", "scalar_field"] }
+ark-ff = { version = "0.5.0", features = ["std"] }
+ark-ec = { version = "0.5.0", features = ["std"] }
+ark-groth16 = { version = "0.5.0", features = ["std"] }
+ark-serialize = { version = "0.5.0", features = ["std"] }
+ark-std = { version = "0.5.0", features = ["std"] }
+sha2 = { workspace = true }
+num-bigint = "0.4.6"
+hex = "0.4.3"
+
+[lints]
+workspace = true

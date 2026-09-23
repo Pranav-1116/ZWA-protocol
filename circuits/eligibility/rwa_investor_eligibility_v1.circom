@@ -217,6 +217,11 @@ template RwaInvestorEligibilityV1(CREDENTIAL_DEPTH, POLICY_DEPTH) {
     tradeHasher.in[2] <== tradePartBHasher.out;
     tradeHasher.in[3] <== tradeMetaHasher.out;
     tradeHasher.out === tradeCommitment;
+
+    // Quadratic binding for public inputs to ensure Groth16 IC is non-zero.
+    signal dummyProd;
+    dummyProd <== activeCredentialRoot * tradeCommitment;
+    dummyProd === activeCredentialRoot * tradeCommitment;
 }
 
 component main {public [activeCredentialRoot, tradeCommitment]} = RwaInvestorEligibilityV1(3, 3);

@@ -128,6 +128,13 @@ template RwaTradeProvenanceV1(MERKLE_DEPTH) {
     tradeHasher.in[3] <== tradeMetaHasher.out;
 
     tradeHasher.out === tradeCommitment;
+
+    // Quadratic binding for public inputs to ensure Groth16 IC is non-zero.
+    // Public inputs only appearing in linear constraints yield IC infinity.
+    // Use dummy = root*commitment with both <== and === to force QAP non-zero.
+    signal dummyProd;
+    dummyProd <== authorizedIssuanceRoot * tradeCommitment;
+    dummyProd === authorizedIssuanceRoot * tradeCommitment;
 }
 
 component main {public [authorizedIssuanceRoot, tradeCommitment]} = RwaTradeProvenanceV1(3);
