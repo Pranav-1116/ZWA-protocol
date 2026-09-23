@@ -47,6 +47,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod non_custodial;
+pub mod zsa;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
