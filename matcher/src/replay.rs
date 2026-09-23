@@ -37,9 +37,9 @@ use std::sync::{Mutex, MutexGuard};
 
 use zwa_protocol::error::ProtocolError;
 use zwa_protocol::lifecycle::{FailureReason, SettlementTxId, TradeLifecycleState};
-use zwa_protocol::numbers::{RootVersion, TradeExpiry, TradeNonce, UnixSeconds, UnixSeconds as UnixSecs, ZatoshiAmount, TradeAmount};
+use zwa_protocol::numbers::{TradeExpiry, TradeNonce, UnixSeconds, ZatoshiAmount, TradeAmount};
 use zwa_protocol::{
-    AssetBaseBytes, FieldElement, MatcherFee, PolicyRoot, RecipientCommitment, ReplayStore,
+    AssetBaseBytes, MatcherFee, PolicyRoot, RecipientCommitment, ReplayStore,
     TradeCommitment, TradeIntent, TradeRecord,
 };
 

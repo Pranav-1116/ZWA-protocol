@@ -48,8 +48,8 @@
 //!    Prevents: Two workers constructing settlement for same commitment, construction after expiry, construction without verification.
 //!
 //! 10. **Return VerifiedTrade / MatcherApproval to settlement adapter (Phase 3 later)**
-//!    Why: Opaque, non-serializable approval that can only be obtained via `evaluate()`. Holds checked trade, authenticated roots, verified control.
-//!    Proves: All 9 gates passed. Does NOT prove: non-custodial settlement (Phase 3 independent seller/buyer auth), wallet spending-key control beyond control challenge, global compliance enforcement, production ZSA mainnet, recursive lineage.
+//!     Why: Opaque, non-serializable approval that can only be obtained via `evaluate()`. Holds checked trade, authenticated roots, verified control.
+//!     Proves: All 9 gates passed. Does NOT prove: non-custodial settlement (Phase 3 independent seller/buyer auth), wallet spending-key control beyond control challenge, global compliance enforcement, production ZSA mainnet, recursive lineage.
 //!
 //! The matcher must not fork commitment logic, byte encodings, root serialization,
 //! or replay semantics. Phase 1 remains single source of truth.

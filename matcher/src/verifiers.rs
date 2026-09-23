@@ -21,7 +21,7 @@
 
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
-use ark_ff::{PrimeField, Zero};
+use ark_ff::PrimeField;
 use ark_groth16::{Groth16, Proof, VerifyingKey};
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
@@ -84,6 +84,7 @@ type SnarkjsG1Json = [String; 3];
 type SnarkjsG2Json = [[String; 2]; 3];
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct SnarkjsVKeyJson {
     protocol: String,
     curve: String,
@@ -98,6 +99,7 @@ struct SnarkjsVKeyJson {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct SnarkjsProofJson {
     pi_a: SnarkjsG1Json,
     pi_b: SnarkjsG2Json,
@@ -679,6 +681,7 @@ mod tests {
         "7239536478138432754387625126231950010993505962177483323536139232738771167323";
     const TRADE_COMMITMENT: &str =
         "10187400613857124614980227259922066295752635539032972479692659299555113110306";
+    #[allow(dead_code)]
     const OTHER_COMMITMENT: &str =
         "7409670081847436957289371955571360481923983184454289247710022466448715682310";
 
