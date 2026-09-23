@@ -6,6 +6,10 @@ license = "MIT"
 repository = "https://github.com/Maheshsiddu29/ZWA-Protocol"
 description = "Matcher gate for ZWA Protocol - checked intent/commitment, root authentication, replay coordination, and proof gating. Imports frozen Phase 1 crates only."
 
+[features]
+default = []
+sqlite = ["rusqlite"]
+
 [dependencies]
 zwa-protocol = { path = "../crates/protocol", version = "0.1.0" }
 zwa-commitments = { path = "../crates/commitments", version = "0.1.0" }
@@ -23,6 +27,7 @@ ark-std = { version = "0.5.0", features = ["std"] }
 sha2 = { workspace = true }
 num-bigint = "0.4.6"
 hex = "0.4.3"
+rusqlite = { version = "0.31", optional = true, features = ["bundled"] }
 
 [dev-dependencies]
 zwa-protocol = { path = "../crates/protocol", version = "0.1.0" }
@@ -40,6 +45,7 @@ ark-std = { version = "0.5.0", features = ["std"] }
 sha2 = { workspace = true }
 num-bigint = "0.4.6"
 hex = "0.4.3"
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [lints]
 workspace = true

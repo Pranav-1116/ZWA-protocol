@@ -1,0 +1,73 @@
+{
+  "version": "root-sig-golden-v1",
+  "description": "Frozen Ed25519 root signatures over ZWA1ROOT canonical payload, verifiable independently in Rust (ed25519-dalek) and JS (tweetnacl). Generated from deterministic seeds [1;32] and [2;32] per RFC8032.",
+  "canonical_encoding": "ZWA1ROOT 8B | kind 1B (1=issuer,2=credential) | version 8B BE | valid_from 8B BE | expires_at 8B BE | id_len 1B | id | root 32B BE (BN254 scalar)",
+  "notes": [
+    "Signs exactly canonical_bytes() from zwa-credentials::envelope — no reserialization",
+    "Rust: VerifyingKey::from_bytes(pubkey).verify(canonical_bytes, Signature::from_bytes(sig))",
+    "JS: tweetnacl.sign.detached.verify(canonical_bytes, sig, pubkey)",
+    "Golden vectors must remain stable — changing payload layout breaks compatibility"
+  ],
+  "issuer": {
+    "kind": 1,
+    "kind_name": "issuer",
+    "issuer_id": "issuer-atlas",
+    "issuer_id_hex": "6973737565722d61746c6173",
+    "version": 1,
+    "valid_from": 1900000000,
+    "expires_at": 2100000000,
+    "authorized_issuance_root_decimal": "19309979006225485291788213177219598381134511159668519266888323889569746782051",
+    "authorized_issuance_root_be_hex": "2ab10f90fed04622ea48b5d7ac5a4c4077e778547a94b202e66507a17b560763",
+    "canonical_payload_hex": "5a574131524f4f5401000000000000000100000000713fb300000000007d2b75000c6973737565722d61746c61732ab10f90fed04622ea48b5d7ac5a4c4077e778547a94b202e66507a17b560763",
+    "canonical_payload_layout": {
+      "magic_ascii": "ZWA1ROOT",
+      "magic_hex": "5a574131524f4f54",
+      "kind": 1,
+      "version_be_hex": "0000000000000001",
+      "valid_from_be_hex": "00000000713fb300",
+      "expires_at_be_hex": "000000007d2b7500",
+      "id_len": 12,
+      "id_len_hex": "0c",
+      "root_be_hex": "2ab10f90fed04622ea48b5d7ac5a4c4077e778547a94b202e66507a17b560763"
+    },
+    "ed25519_pubkey_hex": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "ed25519_seed_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "ed25519_signature_hex": "66b6a15a673936cbaa8ea80c79daf0944f5108d45e28706115c1c745aadf483a621ec503144d34ec3b2dac6b0d55bb914441343a9e6fbc47780b1dd0f45b9407",
+    "verification": {
+      "rust": "ed25519_dalek::VerifyingKey::from_bytes(&hex::decode(pubkey_hex).unwrap().try_into().unwrap()).unwrap().verify(&hex::decode(canonical_hex).unwrap(), &ed25519_dalek::Signature::from_bytes(&hex::decode(sig_hex).unwrap().try_into().unwrap())).unwrap()",
+      "js": "const nacl=require('tweetnacl'); const ok=nacl.sign.detached.verify(Buffer.from(canonical_hex,'hex'), Buffer.from(sig_hex,'hex'), Buffer.from(pubkey_hex,'hex')); // true"
+    }
+  },
+  "credential": {
+    "kind": 2,
+    "kind_name": "credential",
+    "authority_id": "cred-auth-1",
+    "authority_id_hex": "637265642d617574682d31",
+    "version": 1,
+    "valid_from": 1900000000,
+    "expires_at": 2100000000,
+    "active_credential_root_decimal": "7239536478138432754387625126231950010993505962177483323536139232738771167323",
+    "active_credential_root_be_hex": "10016eb4541013090a1fa2a9ecfa26922fe00cce656ab8d50e4d35c037cf685b",
+    "canonical_payload_hex": "5a574131524f4f5402000000000000000100000000713fb300000000007d2b75000b637265642d617574682d3110016eb4541013090a1fa2a9ecfa26922fe00cce656ab8d50e4d35c037cf685b",
+    "canonical_payload_layout": {
+      "magic_ascii": "ZWA1ROOT",
+      "magic_hex": "5a574131524f4f54",
+      "kind": 2,
+      "version_be_hex": "0000000000000001",
+      "valid_from_be_hex": "00000000713fb300",
+      "expires_at_be_hex": "000000007d2b7500",
+      "id_len": 11,
+      "id_len_hex": "0b",
+      "root_be_hex": "10016eb4541013090a1fa2a9ecfa26922fe00cce656ab8d50e4d35c037cf685b"
+    },
+    "ed25519_pubkey_hex": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+    "ed25519_seed_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+    "ed25519_signature_hex": "023c631379facb7dfda669604cd495e920e2491032498043167b3b45c5a0180dce64355fb598e73f680a784764d31760cba100773072089fd4b089161184160f",
+    "verification": {
+      "rust": "ed25519_dalek::VerifyingKey::from_bytes(&hex::decode(pubkey_hex).unwrap().try_into().unwrap()).unwrap().verify(&hex::decode(canonical_hex).unwrap(), &ed25519_dalek::Signature::from_bytes(&hex::decode(sig_hex).unwrap().try_into().unwrap())).unwrap()",
+      "js": "const nacl=require('tweetnacl'); const ok=nacl.sign.detached.verify(Buffer.from(canonical_hex,'hex'), Buffer.from(sig_hex,'hex'), Buffer.from(pubkey_hex,'hex')); // true"
+    }
+  },
+  "js_verification_example": "const nacl=require('tweetnacl'); function verify(hexPayload, hexSig, hexPub){return nacl.sign.detached.verify(Buffer.from(hexPayload,'hex'), Buffer.from(hexSig,'hex'), Buffer.from(hexPub,'hex'));} console.log(verify(issuer.canonical_payload_hex, issuer.ed25519_signature_hex, issuer.ed25519_pubkey_hex)); console.log(verify(credential.canonical_payload_hex, credential.ed25519_signature_hex, credential.ed25519_pubkey_hex));",
+  "rust_verification_example": "use ed25519_dalek::{VerifyingKey, Signature, Verifier}; fn verify(payload_hex:&str, sig_hex:&str, pubkey_hex:&str)->bool{ let payload=hex::decode(payload_hex).unwrap(); let sig_bytes: [u8;64]=hex::decode(sig_hex).unwrap().try_into().unwrap(); let pub_bytes: [u8;32]=hex::decode(pubkey_hex).unwrap().try_into().unwrap(); let vk=VerifyingKey::from_bytes(&pub_bytes).unwrap(); let sig=Signature::from_bytes(&sig_bytes); vk.verify(&payload, &sig).is_ok() }"
+}

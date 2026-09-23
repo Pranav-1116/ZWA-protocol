@@ -57,8 +57,10 @@ pub use control::FakeControlVerifier;
 pub use gate::{GateInput, GateRejection, MatcherGate, VerifiedTrade};
 pub use replay::{
     InMemoryPersistence, JsonFilePersistence, PersistentReplayStore, ReplayPersistence,
-    PersistenceError, ReplayError,
+    RocksDbPersistence, PersistenceError, ReplayError, PERSISTENCE_SCHEMA_VERSION,
 };
+#[cfg(feature = "sqlite")]
+pub use replay::SqlitePersistence;
 pub use roots::{
     check_combined_root_expiry, AuthenticatedCredentialRoot, AuthenticatedIssuerRoot,
     CredentialRootAuthenticator, IssuerRootAuthenticator, RootAuthError,
