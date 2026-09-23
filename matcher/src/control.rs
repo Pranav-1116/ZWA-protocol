@@ -265,6 +265,26 @@ pub struct VerifiedRecipientControl {
 }
 
 impl VerifiedRecipientControl {
+    /// Builds verified control from explicit fields — for V4 real Orchard path.
+    ///
+    /// This constructor is public to allow `RecipientControlVerifier` implementations
+    /// outside `control` module (e.g., in `zwa-settlement`) to produce verified control
+    /// without accessing private fields. It preserves opaque boundary via trait, not via
+    /// private fields alone. The struct remains `!Serialize` and its fields private,
+    /// but construction is allowed for verified implementations.
+    #[must_use]
+    pub fn new(
+        receiver: OrchardReceiverBytes,
+        receiver_commitment: ReceiverCommitment,
+        trade_commitment: TradeCommitment,
+    ) -> Self {
+        Self {
+            receiver,
+            receiver_commitment,
+            trade_commitment,
+        }
+    }
+
     /// Receiver that was verified.
     #[must_use]
     pub fn receiver(&self) -> &OrchardReceiverBytes {

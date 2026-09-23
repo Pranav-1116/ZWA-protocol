@@ -46,6 +46,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod control;
 pub mod non_custodial;
 pub mod zsa;
 
