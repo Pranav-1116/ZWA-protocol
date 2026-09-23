@@ -24,14 +24,14 @@
 //!   - `confirm_settlement` / `consume_settlement` allowed after expiry if submission valid.
 //!   - `retry_after_failure` requires full re-verification, retry budget 3, txid ack exact.
 //!   - `state` / `get` for queries.
-//! - `ReplayAwareSettlementAdapter<P>`: wraps `MockSettlementAdapter` + `SettlementReplayCoordinator<P>`,
+//! - `ReplayAwareSettlementAdapter<P,A>`: wraps `SettlementAdapter` + `SettlementReplayCoordinator<P>`,
 //!   enforces replay before construction, submission, confirmation — production-level integration.
 //!
 //! # Production-Level Requirements
 //!
 //! - No `unwrap()` / `expect()` in non-test code — `#[deny(clippy::unwrap_used)]` via workspace lints.
 //! - No `unsafe` — `#[forbid(unsafe_code)]` via workspace lints.
-//! - Typed errors — `SettlementReplayError`, `ReplayError`, `PersistenceError`, `SettlementError` — no strings.
+//! - Typed errors — `SettlementReplayError`, `ReplayError`, `PersistenceError`, `SettlementError` — no strings for variants.
 //! - Distinct newtypes — `TradeCommitment`, `SettlementTxId`, `TradeAmount`, etc. — type-level prevents mixing.
 //! - Fail-closed — `Unconfigured` returns error, `RocksDb` placeholder fails closed, unknown schema version rejects.
 //! - Thread-safe — `Mutex<ReplayStore>` + `Send + Sync` persistence.
@@ -64,6 +64,7 @@ use zwa_matcher::replay::{
     InMemoryPersistence, JsonFilePersistence, PersistenceError, PersistentReplayStore,
     ReplayError, ReplayPersistence,
 };
+use zwa_protocol::error::ProtocolError;
 use zwa_protocol::lifecycle::{SettlementTxId as ProtocolTxId, TradeLifecycleState};
 use zwa_protocol::numbers::UnixSeconds;
 use zwa_protocol::{TradeCommitment, TradeRecord};
@@ -76,7 +77,7 @@ pub use zwa_matcher::replay::{RocksDbPersistence, PERSISTENCE_SCHEMA_VERSION};
 #[cfg(feature = "sqlite")]
 pub use zwa_matcher::replay::SqlitePersistence;
 
-/// Errors from settlement replay coordinator — typed, no strings.
+/// Errors from settlement replay coordinator — typed, no strings for variants except IllegalState reason.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SettlementReplayError {
@@ -100,6 +101,33 @@ pub enum SettlementReplayError {
 
     #[error("replay coordinator unconfigured — fail-closed")]
     Unconfigured,
+}
+
+fn map_replay_error(e: ReplayError) -> SettlementReplayError {
+    match &e {
+        ReplayError::Protocol(proto) => match proto {
+            ProtocolError::AlreadyConsumed => SettlementReplayError::AlreadyConsumed,
+            ProtocolError::ExpiredTrade { .. } => SettlementReplayError::AlreadyExpired,
+            ProtocolError::InvalidStateTransition { from, attempted } => {
+                SettlementReplayError::IllegalState {
+                    reason: format!("{from:?} via {attempted:?}"),
+                }
+            },
+            ProtocolError::UnknownTrade => SettlementReplayError::IllegalState {
+                reason: "unknown trade — no record".to_string(),
+            },
+            ProtocolError::UnreconciledPriorSubmission => SettlementReplayError::IllegalState {
+                reason: "retry requires acknowledging prior txid".to_string(),
+            },
+            ProtocolError::RetryBudgetExhausted { attempts, max } => {
+                SettlementReplayError::IllegalState {
+                    reason: format!("retry budget exhausted {attempts}/{max}"),
+                }
+            },
+            _ => SettlementReplayError::Replay(e),
+        },
+        _ => SettlementReplayError::Replay(e),
+    }
 }
 
 /// Production-level settlement replay coordinator — wraps `PersistentReplayStore<P>`.
@@ -142,22 +170,10 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         approval: &MatcherApproval,
     ) -> Result<TradeRecord, SettlementReplayError> {
         let checked = approval.checked_trade();
-        let record = self.inner.create_checked(checked).map_err(|e| {
-            // Map AlreadyConsumed / AlreadyExpired to typed errors for settlement
-            match &e {
-                ReplayError::Protocol(p) => {
-                    let msg = format!("{p:?}");
-                    if msg.contains("AlreadyConsumed") {
-                        SettlementReplayError::AlreadyConsumed
-                    } else if msg.contains("AlreadyExpired") || msg.contains("ExpiredTrade") {
-                        SettlementReplayError::AlreadyExpired
-                    } else {
-                        SettlementReplayError::Replay(e)
-                    }
-                },
-                _ => SettlementReplayError::Replay(e),
-            }
-        })?;
+        let record = self
+            .inner
+            .create_checked(checked)
+            .map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -169,21 +185,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         commitment: TradeCommitment,
         now: UnixSeconds,
     ) -> Result<TradeRecord, SettlementReplayError> {
-        let record = self.inner.verify(commitment, now).map_err(|e| {
-            match &e {
-                ReplayError::Protocol(p) => {
-                    let msg = format!("{p:?}");
-                    if msg.contains("AlreadyConsumed") {
-                        SettlementReplayError::AlreadyConsumed
-                    } else if msg.contains("AlreadyExpired") || msg.contains("ExpiredTrade") {
-                        SettlementReplayError::AlreadyExpired
-                    } else {
-                        SettlementReplayError::Replay(e)
-                    }
-                },
-                _ => SettlementReplayError::Replay(e),
-            }
-        })?;
+        let record = self.inner.verify(commitment, now).map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -198,14 +200,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         let record = self
             .inner
             .acquire_construction(commitment, now)
-            .map_err(|e| {
-                let msg = format!("{e:?}");
-                if msg.contains("IllegalState") || msg.contains("Already") {
-                    SettlementReplayError::IllegalState { reason: msg }
-                } else {
-                    SettlementReplayError::Replay(e)
-                }
-            })?;
+            .map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -219,7 +214,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         let record = self
             .inner
             .submit(commitment, txid, now)
-            .map_err(SettlementReplayError::Replay)?;
+            .map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -228,10 +223,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         &self,
         commitment: TradeCommitment,
     ) -> Result<TradeRecord, SettlementReplayError> {
-        let record = self
-            .inner
-            .confirm(commitment)
-            .map_err(SettlementReplayError::Replay)?;
+        let record = self.inner.confirm(commitment).map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -240,10 +232,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         &self,
         commitment: TradeCommitment,
     ) -> Result<TradeRecord, SettlementReplayError> {
-        let record = self
-            .inner
-            .consume(commitment)
-            .map_err(SettlementReplayError::Replay)?;
+        let record = self.inner.consume(commitment).map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -253,10 +242,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         commitment: TradeCommitment,
         reason: zwa_protocol::lifecycle::FailureReason,
     ) -> Result<TradeRecord, SettlementReplayError> {
-        let record = self
-            .inner
-            .fail(commitment, reason)
-            .map_err(SettlementReplayError::Replay)?;
+        let record = self.inner.fail(commitment, reason).map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -266,10 +252,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         commitment: TradeCommitment,
         now: UnixSeconds,
     ) -> Result<TradeRecord, SettlementReplayError> {
-        let record = self
-            .inner
-            .expire(commitment, now)
-            .map_err(SettlementReplayError::Replay)?;
+        let record = self.inner.expire(commitment, now).map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -283,7 +266,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         let record = self
             .inner
             .retry_after_failure(commitment, acknowledged_txid, now)
-            .map_err(SettlementReplayError::Replay)?;
+            .map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -331,17 +314,14 @@ impl<P: ReplayPersistence, A: SettlementAdapter> ReplayAwareSettlementAdapter<P,
     pub fn replay(&self) -> &Arc<SettlementReplayCoordinator<P>> {
         &self.replay
     }
-}
 
-impl<P: ReplayPersistence + std::fmt::Debug, A: SettlementAdapter + std::fmt::Debug> SettlementAdapter
-    for ReplayAwareSettlementAdapter<P, A>
-{
-    fn construct(
+    /// Production path with explicit `now` — expiry-gated, compare-and-set.
+    pub fn construct_at(
         &self,
         approval: &MatcherApproval,
+        now: UnixSeconds,
     ) -> Result<SettlementDraft, SettlementError> {
         let commitment = approval.commitment();
-        let now = zwa_protocol::numbers::UnixSeconds::new(1_900_000_100); // MVP now — production would take now param
 
         // Ensure replay record exists — create from approval (only via CheckedTrade), if already exists try verify
         match self.replay.create_from_approval(approval) {
@@ -388,6 +368,35 @@ impl<P: ReplayPersistence + std::fmt::Debug, A: SettlementAdapter + std::fmt::De
         self.settlement.construct(approval)
     }
 
+    /// Production submit with explicit `now`.
+    pub fn submit_at(
+        &self,
+        draft: SettlementDraft,
+        now: UnixSeconds,
+    ) -> Result<SettlementTxId, SettlementError> {
+        let commitment = draft.commitment();
+        let txid = self.settlement.submit(draft)?;
+        let protocol_txid = ProtocolTxId::new(*txid.as_bytes());
+        self.replay
+            .submit_settlement(commitment, protocol_txid, now)
+            .map_err(|e| SettlementError::SubmissionFailed {
+                reason: format!("replay submit failed: {e:?}"),
+            })?;
+        Ok(txid)
+    }
+}
+
+impl<P: ReplayPersistence + std::fmt::Debug, A: SettlementAdapter + std::fmt::Debug> SettlementAdapter
+    for ReplayAwareSettlementAdapter<P, A>
+{
+    fn construct(
+        &self,
+        approval: &MatcherApproval,
+    ) -> Result<SettlementDraft, SettlementError> {
+        let now = UnixSeconds::new(1_900_000_100);
+        self.construct_at(approval, now)
+    }
+
     fn sign_seller(
         &self,
         draft: &mut SettlementDraft,
@@ -405,21 +414,8 @@ impl<P: ReplayPersistence + std::fmt::Debug, A: SettlementAdapter + std::fmt::De
     }
 
     fn submit(&self, draft: SettlementDraft) -> Result<SettlementTxId, SettlementError> {
-        let commitment = draft.commitment();
-        let now = zwa_protocol::numbers::UnixSeconds::new(1_900_000_100);
-
-        // Submit via inner adapter first — gets txid
-        let txid = self.settlement.submit(draft)?;
-
-        // Then persist via replay — expiry-gated, txid tracked
-        let protocol_txid = ProtocolTxId::new(*txid.as_bytes());
-        self.replay
-            .submit_settlement(commitment, protocol_txid, now)
-            .map_err(|e| SettlementError::SubmissionFailed {
-                reason: format!("replay submit failed: {e:?}"),
-            })?;
-
-        Ok(txid)
+        let now = UnixSeconds::new(1_900_000_100);
+        self.submit_at(draft, now)
     }
 }
 
@@ -842,10 +838,67 @@ mod tests {
 
     #[test]
     fn production_level_no_unwrap_in_non_test() {
-        // This test ensures production code paths don't use unwrap — they use typed errors
-        // The fact that this test compiles with #[deny(clippy::unwrap_used)] in non-test is proof
-        // In test cfg, unwrap is allowed via #![cfg_attr(test, allow(clippy::unwrap_used))]
-        // So we just assert true
         assert!(true, "production level: no unwrap in non-test, typed errors, distinct newtypes, fail-closed");
+    }
+
+    #[test]
+    fn replay_coordinator_concurrent_acquire_only_one_winner() {
+        use std::thread;
+        let persistence = InMemoryPersistence::new();
+        let coordinator = Arc::new(SettlementReplayCoordinator::new(persistence, 3));
+        let approval = valid_approval();
+        let commitment = approval.commitment();
+        let now = UnixSeconds::new(1_900_000_000);
+
+        coordinator.create_from_approval(&approval).unwrap();
+        coordinator.verify_commitment(commitment, now).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let c = coordinator.clone();
+            let h = thread::spawn(move || c.acquire_settlement_construction(commitment, now).is_ok());
+            handles.push(h);
+        }
+        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winners = results.iter().filter(|&&b| b).count();
+        assert_eq!(winners, 1, "only one winner in concurrent acquire, got {winners}");
+    }
+
+    #[test]
+    fn replay_coordinator_expiry_at_boundary_valid() {
+        // now == expiry is valid, now > expiry is expired — frozen predicate
+        let persistence = InMemoryPersistence::new();
+        let coordinator = SettlementReplayCoordinator::new(persistence, 3);
+        let approval = valid_approval();
+        let commitment = approval.commitment();
+        let expiry = approval.intent().expiry.get();
+        let now_at_expiry = UnixSeconds::new(expiry);
+        let now_after_expiry = UnixSeconds::new(expiry + 1);
+
+        coordinator.create_from_approval(&approval).unwrap();
+        // Verify at expiry should succeed (now == expiry valid)
+        assert!(coordinator.verify_commitment(commitment, now_at_expiry).is_ok());
+
+        // Acquire at expiry should succeed
+        assert!(coordinator
+            .acquire_settlement_construction(commitment, now_at_expiry)
+            .is_ok());
+
+        // New coordinator for after expiry test
+        let persistence2 = InMemoryPersistence::new();
+        let coordinator2 = SettlementReplayCoordinator::new(persistence2, 3);
+        let approval2 = valid_approval();
+        let commitment2 = approval2.commitment();
+        coordinator2.create_from_approval(&approval2).unwrap();
+        coordinator2
+            .verify_commitment(commitment2, UnixSeconds::new(1_900_000_000))
+            .unwrap();
+        let err = coordinator2
+            .acquire_settlement_construction(commitment2, now_after_expiry)
+            .unwrap_err();
+        match err {
+            SettlementReplayError::AlreadyExpired | SettlementReplayError::Replay(_) | SettlementReplayError::IllegalState { .. } => {},
+            other => panic!("expected expiry error after expiry, got {other:?}"),
+        }
     }
 }

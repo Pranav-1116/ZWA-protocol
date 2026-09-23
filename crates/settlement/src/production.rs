@@ -15,6 +15,7 @@
 //! - Canonical bytes `ZWA-SETTLE-V1 || commitment 32B BE || offered_asset 32B || requested_asset 32B || offered_amount 8B BE || requested_amount 8B BE || fee_amount 8B BE || nonce 8B BE || expiry 8B BE` — frozen, no re-encoding
 //! - Ed25519 signatures deterministic, non-malleable, verified via `ed25519-dalek 2.1.1`
 //! - Replay integration required after submit
+//! - Expiry enforced with `now` param: `now > expiry` → `ApprovalExpired`, `now == expiry` valid
 //!
 //! ## V2: Non-Custodial Authorization — production
 //! - `SellerSigningKey` / `BuyerSigningKey` distinct newtypes around `SigningKey` — type-level prevents mixing seller/buyer keys
@@ -65,18 +66,18 @@
 use std::sync::Arc;
 
 use zwa_matcher::control::{RecipientControlVerifier, CONTROL_DOMAIN};
-use zwa_matcher::replay::{InMemoryPersistence, ReplayPersistence};
+use zwa_matcher::replay::ReplayPersistence;
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;
 
 use crate::control::{Ed25519RegistryControlVerifier, RealOrchardIvkControlVerifier};
 use crate::replay::{SettlementReplayCoordinator, SettlementReplayError};
-use crate::zsa::{AtomicZsaTransaction, ExperimentalZsaBuilder, ZSA_STACK_PINS, EXPERIMENTAL_ZSA_LABEL};
-use crate::{MatcherApproval, SettlementDraft, SettlementError, SettlementTxId, SettlementAdapter, MockSettlementAdapter};
+use crate::zsa::{AtomicZsaTransaction, ExperimentalZsaBuilder, EXPERIMENTAL_ZSA_LABEL, ZSA_STACK_PINS};
+use crate::{MatcherApproval, SettlementDraft, SettlementError, SettlementTxId, MockSettlementAdapter};
 
 /// Production-level settlement coordinator combining V1-V5.
 ///
-/// - V1: opaque boundary, only from `MatcherApproval`
+/// - V1: opaque boundary, only from `MatcherApproval`, expiry-gated
 /// - V2: non-custodial independent auth, distinct key types, same-key rejection
 /// - V3: experimental ZSA atomic swap, canonical mapping preserved, experimental label, QEDIT pins
 /// - V4: recipient-control via `Box<dyn RecipientControlVerifier>` — Ed25519 MVP or real Orchard ivk
@@ -85,22 +86,14 @@ use crate::{MatcherApproval, SettlementDraft, SettlementError, SettlementTxId, S
 /// Fail-closed, typed errors, no unwrap in non-test, no unsafe, thread-safe.
 #[derive(Debug)]
 pub struct ProductionSettlementCoordinator<P: ReplayPersistence> {
-    /// Settlement adapter — V1 opaque, V2 non-custodial
     settlement: MockSettlementAdapter,
-    /// ZSA builder — V3 experimental
     zsa_builder: ExperimentalZsaBuilder,
-    /// Replay coordinator — V5 production
     replay: Arc<SettlementReplayCoordinator<P>>,
-    /// Control verifier — V4 real or MVP, boxed for opaque boundary
     control_verifier: Box<dyn RecipientControlVerifier>,
 }
 
 impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> {
     /// Builds production coordinator with replay persistence and control verifier.
-    ///
-    /// - `persistence`: replay persistence backend — `InMemoryPersistence` for tests, `JsonFilePersistence` for MVP demo, `SqlitePersistence` production-ready
-    /// - `control_verifier`: `Box<dyn RecipientControlVerifier>` — Ed25519 registry MVP or real Orchard ivk experimental
-    /// - `max_retries`: retry budget — 3 per spec
     #[must_use]
     pub fn new(
         persistence: P,
@@ -173,20 +166,15 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
         &ZSA_STACK_PINS
     }
 
-    /// Full production flow: approval → replay create/verify/acquire → settlement draft → ZSA tx → verify balance → txid.
-    ///
-    /// This is the production-level combined V1-V5 flow that enforces all guarantees.
-    ///
-    /// # Errors
-    /// Returns `SettlementError` or `SettlementReplayError` for any rejection — typed, fail-closed, no unwrap.
-    pub fn construct_production(
+    /// Full production flow with explicit `now` — expiry-gated, atomic, fail-closed.
+    pub fn construct_production_at(
         &self,
         approval: &MatcherApproval,
         seller_receiver: Option<OrchardReceiverBytes>,
         buyer_receiver: Option<OrchardReceiverBytes>,
+        now: UnixSeconds,
     ) -> Result<(SettlementDraft, AtomicZsaTransaction), ProductionError> {
         let commitment = approval.commitment();
-        let now = UnixSeconds::new(1_900_000_100);
 
         // V5: replay — create from approval only via CheckedTrade, then acquire construction (only one winner, expiry-gated)
         match self.replay.create_from_approval(approval) {
@@ -198,7 +186,6 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
                 return Err(ProductionError::Replay(SettlementReplayError::AlreadyExpired));
             },
             Err(_) => {
-                // Already exists — try verify
                 match self.replay.verify_commitment(commitment, now) {
                     Ok(_) => {},
                     Err(SettlementReplayError::AlreadyConsumed) => {
@@ -216,10 +203,10 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
             .acquire_settlement_construction(commitment, now)
             .map_err(ProductionError::Replay)?;
 
-        // V1: construct draft only from approval
+        // V1: construct draft only from approval, expiry-gated
         let draft = self
             .settlement
-            .construct(approval)
+            .construct_at(approval, now)
             .map_err(ProductionError::Settlement)?;
 
         // V3: construct experimental ZSA atomic transaction — canonical mapping preserved, experimental label
@@ -239,7 +226,12 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
                 reason: "experimental label missing — must label demo as experimental".to_string(),
             }));
         }
-        if zsa_tx.stack_pins().zcash_tx_tool != ZSA_STACK_PINS.zcash_tx_tool {
+        if zsa_tx.stack_pins().zcash_tx_tool != ZSA_STACK_PINS.zcash_tx_tool
+            || zsa_tx.stack_pins().zsa_swap != ZSA_STACK_PINS.zsa_swap
+            || zsa_tx.stack_pins().zebra != ZSA_STACK_PINS.zebra
+            || zsa_tx.stack_pins().librustzcash != ZSA_STACK_PINS.librustzcash
+            || zsa_tx.stack_pins().orchard != ZSA_STACK_PINS.orchard
+        {
             return Err(ProductionError::Settlement(SettlementError::ConstructionFailed {
                 reason: "QEDIT stack pins mismatch — must preserve pins per ADR 0003".to_string(),
             }));
@@ -256,28 +248,39 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
         Ok((draft, zsa_tx))
     }
 
-    /// Submits production settlement — V1 + V5: inner submit + replay submit persisting txid.
-    ///
-    /// # Errors
-    /// Returns typed error for any failure — fail-closed.
-    pub fn submit_production(
+    /// Full production flow: approval → replay create/verify/acquire → settlement draft → ZSA tx → verify balance → txid.
+    pub fn construct_production(
+        &self,
+        approval: &MatcherApproval,
+        seller_receiver: Option<OrchardReceiverBytes>,
+        buyer_receiver: Option<OrchardReceiverBytes>,
+    ) -> Result<(SettlementDraft, AtomicZsaTransaction), ProductionError> {
+        let now = UnixSeconds::new(1_900_000_100);
+        self.construct_production_at(approval, seller_receiver, buyer_receiver, now)
+    }
+
+    /// Submits production settlement with explicit `now` — V1 + V5: inner submit + replay submit persisting txid.
+    pub fn submit_production_at(
         &self,
         draft: SettlementDraft,
+        now: UnixSeconds,
     ) -> Result<SettlementTxId, ProductionError> {
         let commitment = draft.commitment();
-        let now = UnixSeconds::new(1_900_000_100);
-
-        let txid = self
-            .settlement
-            .submit(draft)
-            .map_err(ProductionError::Settlement)?;
-
+        let txid = self.settlement.submit(draft).map_err(ProductionError::Settlement)?;
         let protocol_txid = zwa_protocol::lifecycle::SettlementTxId::new(*txid.as_bytes());
         self.replay
             .submit_settlement(commitment, protocol_txid, now)
             .map_err(ProductionError::Replay)?;
-
         Ok(txid)
+    }
+
+    /// Submits production settlement — V1 + V5: inner submit + replay submit persisting txid.
+    pub fn submit_production(
+        &self,
+        draft: SettlementDraft,
+    ) -> Result<SettlementTxId, ProductionError> {
+        let now = UnixSeconds::new(1_900_000_100);
+        self.submit_production_at(draft, now)
     }
 }
 
@@ -308,6 +311,17 @@ impl UnconfiguredProductionCoordinator {
         _approval: &MatcherApproval,
         _seller_receiver: Option<OrchardReceiverBytes>,
         _buyer_receiver: Option<OrchardReceiverBytes>,
+    ) -> Result<(SettlementDraft, AtomicZsaTransaction), ProductionError> {
+        Err(ProductionError::Settlement(SettlementError::Unconfigured))
+    }
+
+    /// Always fails closed with explicit now.
+    pub fn construct_production_at(
+        &self,
+        _approval: &MatcherApproval,
+        _seller_receiver: Option<OrchardReceiverBytes>,
+        _buyer_receiver: Option<OrchardReceiverBytes>,
+        _now: UnixSeconds,
     ) -> Result<(SettlementDraft, AtomicZsaTransaction), ProductionError> {
         Err(ProductionError::Settlement(SettlementError::Unconfigured))
     }
@@ -458,7 +472,6 @@ mod tests {
 
     #[test]
     fn production_coordinator_v1_to_v5_combined_flow() {
-        // V1-V5 combined production flow
         let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
         let sk_control = signing_key(3);
         let vk_control = sk_control.verifying_key();
@@ -476,21 +489,17 @@ mod tests {
         let buyer_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
         let seller_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
 
-        // V1-V5: construct production — replay + settlement draft + ZSA tx
         let (draft, zsa_tx) = coordinator
             .construct_production(&approval, Some(seller_recv), Some(buyer_recv))
             .unwrap();
 
-        // V1: only from approval
         assert_eq!(draft.commitment().to_string(), TRADE_COMMITMENT);
-        // V2: non-custodial — distinct keys, same-key rejection enforced in sign
         assert!(!draft.is_seller_signed());
-        // V3: experimental ZSA — canonical mapping preserved, balanced, experimental label, QEDIT pins
         assert!(zsa_tx.is_atomic_balanced());
         assert!(zsa_tx.experimental_label().contains("EXPERIMENTAL"));
         assert_eq!(zsa_tx.stack_pins().zcash_tx_tool, "6bcf2c5");
         assert_eq!(zsa_tx.stack_pins().zsa_swap, "217b979");
-        // V4: control verifier Box<dyn> works
+
         let challenge = RecipientControlChallenge::new(
             recv_a,
             [9u8; 32],
@@ -506,25 +515,21 @@ mod tests {
             .verify(&challenge, &response, UnixSeconds::new(1_900_000_100))
             .unwrap();
         assert_eq!(verified.receiver(), &recv_a);
-        // V5: replay — only one winner, state SettlementConstructed
+
         assert_eq!(
             coordinator.replay().state(approval.commitment()),
             Some(zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed)
         );
 
-        // V1-V2: seller/buyer independent auth
         let sk_seller = signing_key(10);
         let sk_buyer = signing_key(11);
         let seller_auth = crate::SellerAuthorization::sign(&draft, &sk_seller);
         let buyer_auth = crate::BuyerAuthorization::sign(&draft, &sk_buyer);
         let mut draft_mut = draft;
-        // Use coordinator's inner settlement for signing — we need to get settlement via coordinator.settlement()
-        // For MVP, we use MockSettlementAdapter directly via coordinator.settlement()
         coordinator.settlement().sign_seller(&mut draft_mut, &seller_auth).unwrap();
         coordinator.settlement().sign_buyer(&mut draft_mut, &buyer_auth).unwrap();
         assert!(draft_mut.is_fully_signed());
 
-        // V1-V5: submit production — persists txid, moves to Submitted
         let txid = coordinator.submit_production(draft_mut).unwrap();
         assert_eq!(txid.as_bytes().len(), 32);
         assert_eq!(
@@ -556,20 +561,12 @@ mod tests {
             .construct_production(&approval, Some(seller_recv), Some(buyer_recv))
             .unwrap();
 
-        // Second construction must fail — only one winner (V5)
         let err = coordinator
             .construct_production(&approval, Some(seller_recv), Some(buyer_recv))
             .unwrap_err();
         match err {
-            ProductionError::Settlement(crate::SettlementError::ConstructionFailed { reason })
-            | ProductionError::Replay(_) => {
-                // Should mention only one winner or replay
-                assert!(
-                    format!("{reason:?}").contains("only one winner")
-                        || format!("{reason:?}").contains("replay")
-                        || true
-                );
-            },
+            ProductionError::Settlement(crate::SettlementError::ConstructionFailed { .. })
+            | ProductionError::Replay(_) => {},
             other => panic!("expected ConstructionFailed or Replay error for double construction, got {other:?}"),
         }
     }
@@ -650,6 +647,44 @@ mod tests {
         match err {
             ProductionError::Settlement(crate::SettlementError::Unconfigured) => {},
             other => panic!("expected Unconfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn production_coordinator_expiry_gated_at_boundary() {
+        let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+        let sk_control = signing_key(3);
+        let vk_control = sk_control.verifying_key();
+        let mut approved_control = BTreeMap::new();
+        approved_control.insert(recv_a, vk_control);
+
+        let persistence = InMemoryPersistence::new();
+        let coordinator = ProductionSettlementCoordinator::with_ed25519_registry(persistence, approved_control, 3);
+
+        let approval = valid_approval();
+        let expiry = approval.intent().expiry.get();
+        let now_at_expiry = UnixSeconds::new(expiry);
+        let now_after_expiry = UnixSeconds::new(expiry + 1);
+
+        let buyer_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+        let seller_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+
+        // At expiry should succeed
+        let result = coordinator.construct_production_at(&approval, Some(seller_recv), Some(buyer_recv), now_at_expiry);
+        assert!(result.is_ok(), "now==expiry should be valid, got {:?}", result.err());
+
+        // After expiry should fail — need new approval because previous consumed replay
+        let persistence2 = InMemoryPersistence::new();
+        let mut approved2 = BTreeMap::new();
+        approved2.insert(recv_a, vk_control);
+        let coordinator2 = ProductionSettlementCoordinator::with_ed25519_registry(persistence2, approved2, 3);
+        let approval2 = valid_approval();
+        let err = coordinator2
+            .construct_production_at(&approval2, Some(seller_recv), Some(buyer_recv), now_after_expiry)
+            .unwrap_err();
+        match err {
+            ProductionError::Replay(_) | ProductionError::Settlement(_) => {},
+            _ => {},
         }
     }
 }

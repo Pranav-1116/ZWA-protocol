@@ -405,18 +405,29 @@ impl MockSettlementAdapter {
     pub fn new() -> Self {
         Self
     }
-}
 
-impl SettlementAdapter for MockSettlementAdapter {
-    fn construct(&self, approval: &MatcherApproval) -> Result<SettlementDraft, SettlementError> {
+    /// Production-level construct with explicit `now` — expiry-gated.
+    ///
+    /// Frozen predicate: `now > expiry` → expired, `now == expiry` valid.
+    /// This is the production path; `construct()` delegates to it with MVP now.
+    pub fn construct_at(
+        &self,
+        approval: &MatcherApproval,
+        now: zwa_protocol::numbers::UnixSeconds,
+    ) -> Result<SettlementDraft, SettlementError> {
         let commitment = approval.commitment();
         let intent = approval.intent();
 
-        // Check expiry — trade must not be expired at construction time (use current time as now for MVP)
-        // In real adapter, now would be supplied, here we just check intent expiry is not zero
+        // Production expiry check — frozen predicate
         if intent.expiry.get() == 0 {
             return Err(SettlementError::ConstructionFailed {
                 reason: "trade expiry zero".to_string(),
+            });
+        }
+        if now.get() > intent.expiry.get() {
+            return Err(SettlementError::ApprovalExpired {
+                expiry: intent.expiry.get(),
+                now: now.get(),
             });
         }
 
@@ -432,6 +443,15 @@ impl SettlementAdapter for MockSettlementAdapter {
             buyer_vk: None,
             _private: (),
         })
+    }
+}
+
+impl SettlementAdapter for MockSettlementAdapter {
+    fn construct(&self, approval: &MatcherApproval) -> Result<SettlementDraft, SettlementError> {
+        // MVP now — production should use construct_at with real now
+        // Fixed now 1_900_000_100 is before golden intent expiry 2_000_000_000, so valid
+        let now = zwa_protocol::numbers::UnixSeconds::new(1_900_000_100);
+        self.construct_at(approval, now)
     }
 
     fn sign_seller(

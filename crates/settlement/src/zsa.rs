@@ -440,14 +440,14 @@ impl ExperimentalZsaBuilder {
 
         // Seller's offered asset input — seller owns offered asset note
         // AssetBase 32B canonical via as_bytes() — no re-encoding, frozen
+        // Production: seller commitment should be derived from seller's own receiver commitment,
+        // for MVP we use matcher fee recipient commitment as distinct placeholder that is already
+        // canonical and from intent, avoiding hardcoded decimal parsing in production path.
+        let seller_commitment = intent.matcher_fee.recipient_commitment;
         let seller_offered_input = ZsaAssetNote {
             asset: intent.offered_asset, // direct copy of AssetBaseBytes 32B, no re-encoding
             amount: intent.offered_amount,
-            owner_commitment: RecipientCommitment::from_decimal_str(
-                "1800273984094439421343257609634901689467303577600258601269976617936586404380",
-            )
-            .unwrap_or(intent.recipient_commitment), // placeholder for seller commitment — in real, seller's own commitment
-            // For demo, we use a distinct commitment to show seller vs buyer
+            owner_commitment: seller_commitment,
             owner_receiver: seller_receiver_opt,
             note_type: ZsaNoteType::SellerOfferedInput,
             _private: (),
@@ -474,13 +474,12 @@ impl ExperimentalZsaBuilder {
         };
 
         // Seller's receipt of requested asset — same AssetBase 32B, same amount, to seller receiver
+        // Production: seller receipt commitment is seller's own, for MVP we use intent recipient commitment
+        // which is canonical and preserves mapping, avoiding hardcoded decimal that could fail parsing.
         let seller_requested_output = ZsaAssetNote {
             asset: intent.requested_asset,
             amount: intent.requested_amount,
-            owner_commitment: RecipientCommitment::from_decimal_str(
-                "13135279047718387126053226034283670929172341955108098732820235388025453726181",
-            )
-            .unwrap_or(intent.recipient_commitment),
+            owner_commitment: intent.recipient_commitment,
             owner_receiver: seller_receiver_opt,
             note_type: ZsaNoteType::SellerRequestedOutput,
             _private: (),
@@ -540,13 +539,11 @@ impl ExperimentalZsaBuilder {
 
         let canonical_bytes = AtomicZsaTransaction::compute_canonical_bytes(&intent, &commitment);
 
+        let seller_commitment = intent.matcher_fee.recipient_commitment;
         let seller_offered_input = ZsaAssetNote {
             asset: intent.offered_asset,
             amount: intent.offered_amount,
-            owner_commitment: RecipientCommitment::from_decimal_str(
-                "1800273984094439421343257609634901689467303577600258601269976617936586404380",
-            )
-            .unwrap_or(intent.recipient_commitment),
+            owner_commitment: seller_commitment,
             owner_receiver: seller_receiver,
             note_type: ZsaNoteType::SellerOfferedInput,
             _private: (),
@@ -573,10 +570,7 @@ impl ExperimentalZsaBuilder {
         let seller_requested_output = ZsaAssetNote {
             asset: intent.requested_asset,
             amount: intent.requested_amount,
-            owner_commitment: RecipientCommitment::from_decimal_str(
-                "13135279047718387126053226034283670929172341955108098732820235388025453726181",
-            )
-            .unwrap_or(intent.recipient_commitment),
+            owner_commitment: intent.recipient_commitment,
             owner_receiver: seller_receiver,
             note_type: ZsaNoteType::SellerRequestedOutput,
             _private: (),
