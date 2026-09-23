@@ -65,9 +65,9 @@ pub use roots::{
     check_combined_root_expiry, AuthenticatedCredentialRoot, AuthenticatedIssuerRoot,
     CredentialRootAuthenticator, IssuerRootAuthenticator, RootAuthError,
 };
-pub use verifiers::{
-    EligibilityVerifierBackend, MatcherProofGate, ProvenanceVerifierBackend, make_test_proof_json,
-};
+pub use verifiers::{EligibilityVerifierBackend, MatcherProofGate, ProvenanceVerifierBackend};
+#[cfg(test)]
+pub use verifiers::make_test_proof_json;
 
 // Re-export frozen crates for matcher consumers so they don't need direct deps.
 pub use zwa_commitments;
