@@ -54,7 +54,7 @@ pub use control::{
 };
 #[cfg(test)]
 pub use control::FakeControlVerifier;
-pub use gate::{GateInput, GateRejection, MatcherGate, VerifiedTrade};
+pub use gate::{GateInput, GateRejection, MatcherApproval, MatcherGate, VerifiedTrade};
 pub use replay::{
     InMemoryPersistence, JsonFilePersistence, PersistentReplayStore, ReplayPersistence,
     RocksDbPersistence, PersistenceError, ReplayError, PERSISTENCE_SCHEMA_VERSION,

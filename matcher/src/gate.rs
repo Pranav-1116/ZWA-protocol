@@ -1,17 +1,55 @@
-//! 10-step deterministic matcher gate — Task F.
+//! 10-step deterministic matcher gate — Task F + A7 complete.
 //!
-//! Combines Tasks A-E into a single allow/block decision per handbook Sec 15:
+//! Combines Tasks A-E into a single **fail-closed** allow/block decision per handbook Sec 15.
+//! Cheap checks happen before expensive proof verification.
 //!
-//! 1. Parse canonical TradeIntent + TradeCommitmentV1 (already typed)
-//! 2. Verify intent/commitment correspondence → CheckedTrade (Task A, ZWA-REL-001)
-//! 3. Authenticate issuer + credential root signatures vs approved keyset (Task B)
-//! 4. Require current version, freshness, trade_expiry ≤ root_expiry, combined min (Task B)
-//! 5. Verify live wallet control of authority-approved receiver (Task C)
-//! 6. Verify trade expiry + replay state permit verification (Task E)
-//! 7. Verify provenance proof vs authorizedIssuanceRoot + checked commitment (Task D)
-//! 8. Verify eligibility Phase1B proof vs activeCredentialRoot + same commitment (Task D)
-//! 9. Acquire settlement construction only after 1-8 succeed (Task E compare-and-set)
-//! 10. Return VerifiedTrade to settlement adapter (Phase 3 later)
+//! # Exact order and why each gate exists (Sec 23 threat model)
+//!
+//! 1. **Parse canonical TradeIntent + TradeCommitmentV1** (already typed)
+//!    Why: Prevents ticker/symbol confusion — canonical 32B AssetBase (Pallas compressed) + 43B Orchard receiver are only representations. No display metadata.
+//!    Prevents: Fake RWA with convincing name.
+//!
+//! 2. **Verify intent/commitment correspondence → CheckedTrade (Task A, ZWA-REL-001)**
+//!    Why: `ReplayStore::create(commitment, intent)` stores without recomputing. Pairing real commitment with different intent would make expiry enforcement use wrong intent.
+//!    Prevents: Intent substitution (amount, fee, recipient, policy, nonce, expiry mutation), expiry bypass. Makes mismatched pair structurally impossible to reach replay/proofs.
+//!    Output: `CheckedTrade` opaque witness, only constructor calls `verify_trade_commitment`.
+//!
+//! 3. **Authenticate issuer + credential root signatures vs approved keyset (Task B)**
+//!    Why: Roots are public inputs to circuits, but authenticity is not proven inside circuits. Matcher must verify Ed25519 over frozen canonical payload `"ZWA1ROOT" | kind | version BE | valid_from BE | expires_at BE | id_len | id | root 32B`.
+//!    Prevents: Forged/stale issuer root, forged credential root, wrong authority, signature malleability (Ed25519 deterministic, non-malleable 64B).
+//!
+//! 4. **Require current version, freshness, trade_expiry ≤ root_expiry, combined min (Task B)**
+//!    Why: Version 0 invalid, only current version accepted (supersession — stale-but-signed rejected), `window.contains(now)` freshness, trade must not outlive roots.
+//!    Prevents: Stale/superseded root replay, not-yet-valid root, trade expiry beyond root expiry, revocation latency abuse. Combined `trade_expiry ≤ min(issuer_expiry, credential_expiry)` ensures trade valid through earliest root.
+//!    Output: `AuthenticatedIssuerRoot`, `AuthenticatedCredentialRoot` private envelope, cannot be fabricated.
+//!
+//! 5. **Verify live wallet control of authority-approved receiver (Task C + A5)**
+//!    Why: Phase1B binds authority-approved receiver into credential leaf: `credential(A)+trade(A) PASS, credential(A)+trade(B) FAIL`. That prevents lending at circuit level, but not pre-proof secret lending. Live control proves trader currently controls approved receiver. Domain `ZWA-RECIPIENT-CTRL-V1`, nonce[32] fresh, issued_at/expiry, receiver 43B, trade_commitment 32B all in canonical bytes.
+//!    Prevents: Credential secret lent to another wallet, approved A without wallet control, challenge replay across domains/times/receivers/trades, expired challenge reuse.
+//!    Output: `VerifiedRecipientControl` with receiver_commitment `H(RECEIVR1, limbs)` canonical.
+//!
+//! 6. **Verify trade expiry + replay state permit verification (Task E + A6)**
+//!    Why: Frozen predicate `now > expiry` (now == expiry valid), expiry re-checked at verify, acquire_construction, submit, retry. `confirm`/`consume` allowed after expiry if submission was valid. `FAILED → CREATED → full re-verification` (085efe0 fix). `CONSUMED`/`EXPIRED` terminal.
+//!    Prevents: Replay after settlement, retry using stale verification, construction/submission after expiry, double construction (compare-and-set, only one winner), retry budget exhaustion.
+//!    Output: Persistent `CREATED → VERIFIED` via `PersistentReplayStore` with atomic file persistence, survives restart.
+//!
+//! 7. **Verify provenance proof vs authorizedIssuanceRoot + checked commitment (Task D + A4)**
+//!    Why: Proves offered AssetBase belongs to issuer-authorized issuance set (Merkle depth 3). Public inputs order frozen `[root, commitment]`.
+//!    Prevents: Fake RWA, wrong issuance root, amount/fee/recipient substitution via commitment binding, proof malformed/rejected.
+//!    Gate: Uses exact `checked_trade.commitment()` from Task A — no re-derivation.
+//!
+//! 8. **Verify eligibility Phase1B proof vs activeCredentialRoot + same commitment (Task D + A4)**
+//!    Why: Private credential + policy + approved receiver binding to same trade. Range checks investor class 8b, jurisdiction 16b, expiry 64b, nonce 64b. Single receiverHasher reused twice per security comment.
+//!    Prevents: Wrong investor class/jurisdiction, borrowed credential, credential A + trade B, proof splicing (same commitment invariant via `MatcherProofGate`), VK substitution via hash check.
+//!    Output: Both proofs verified against **same** `TradeCommitmentV1`.
+//!
+//! 9. **Acquire settlement construction only after 1-8 succeed (Task E compare-and-set)**
+//!    Why: Expensive atomic ZSA settlement (pinned experimental stack) must only happen after all cheap gates pass. Acquire is atomic, only one worker wins.
+//!    Prevents: Two workers constructing settlement for same commitment, construction after expiry, construction without verification.
+//!
+//! 10. **Return VerifiedTrade / MatcherApproval to settlement adapter (Phase 3 later)**
+//!    Why: Opaque, non-serializable approval that can only be obtained via `evaluate()`. Holds checked trade, authenticated roots, verified control.
+//!    Proves: All 9 gates passed. Does NOT prove: non-custodial settlement (Phase 3 independent seller/buyer auth), wallet spending-key control beyond control challenge, global compliance enforcement, production ZSA mainnet, recursive lineage.
 //!
 //! The matcher must not fork commitment logic, byte encodings, root serialization,
 //! or replay semantics. Phase 1 remains single source of truth.
@@ -72,17 +110,83 @@ pub enum GateRejection {
 }
 
 /// A trade that has passed the full matcher gate and is ready for settlement construction.
-#[derive(Debug, Clone)]
+///
+/// This is the `MatcherApproval` from spec A7 — **opaque and non-serializable**:
+///
+/// - Fields are private, no `Clone`, no `Serialize`, no public constructor outside `gate` module.
+/// - Contains a private `_private: ()` marker so external crates cannot use struct literal syntax.
+/// - `Debug` is implemented but does not expose secrets; `Display` is not implemented.
+/// - Can only be obtained via `MatcherGate::evaluate()` after all 10 gates pass.
+///
+/// # What it proves
+///
+/// - Intent/commitment correspondence verified (Task A, ZWA-REL-001)
+/// - Issuer root signature valid under approved key, current version, fresh, trade_expiry ≤ root_expiry (Task B)
+/// - Credential root signature valid, current, fresh, trade_expiry ≤ root_expiry, combined min enforced (Task B)
+/// - Live wallet control of authority-approved receiver (Task C, Phase1B + live control)
+/// - Replay state allowed verification, now verified (Task E)
+/// - Provenance proof valid for `authorizedIssuanceRoot` + exact `tradeCommitment` (Task D)
+/// - Eligibility proof valid for `activeCredentialRoot` + same `tradeCommitment` (Task D)
+/// - Settlement construction acquired (compare-and-set, only one winner)
+///
+/// # What it does NOT prove (per Sec 6, 24, 30)
+///
+/// - Not non-custodial settlement — seller/buyer independent authorization is Phase 3
+/// - Not wallet spending-key control beyond Ed25519 control challenge (real Orchard ivk proof is research)
+/// - Not global compliance enforcement — matcher is MVP compliance boundary, Zcash consensus does not enforce investor policy
+/// - Not production ZSA mainnet — ZSA settlement is experimental QEDIT stack
+/// - Not recursive lineage — optional research track
+#[derive(Debug)]
 pub struct VerifiedTrade {
-    /// Checked intent/commitment witness (Task A).
-    pub checked_trade: CheckedTrade,
-    /// Authenticated issuer root (Task B).
-    pub authenticated_issuer_root: AuthenticatedIssuerRoot,
-    /// Authenticated credential root (Task B).
-    pub authenticated_credential_root: AuthenticatedCredentialRoot,
-    /// Verified live control of approved receiver (Task C).
-    pub verified_control: VerifiedRecipientControl,
+    checked_trade: CheckedTrade,
+    authenticated_issuer_root: AuthenticatedIssuerRoot,
+    authenticated_credential_root: AuthenticatedCredentialRoot,
+    verified_control: VerifiedRecipientControl,
+    // Private marker prevents external construction and makes type opaque.
+    // Also makes it !Clone and !Serialize by not deriving those traits.
+    _private: (),
 }
+
+impl VerifiedTrade {
+    /// Canonical checked trade that was approved.
+    #[must_use]
+    pub fn checked_trade(&self) -> &CheckedTrade {
+        &self.checked_trade
+    }
+
+    /// Authenticated issuer root that was used.
+    #[must_use]
+    pub fn authenticated_issuer_root(&self) -> &AuthenticatedIssuerRoot {
+        &self.authenticated_issuer_root
+    }
+
+    /// Authenticated credential root that was used.
+    #[must_use]
+    pub fn authenticated_credential_root(&self) -> &AuthenticatedCredentialRoot {
+        &self.authenticated_credential_root
+    }
+
+    /// Verified live control of approved receiver.
+    #[must_use]
+    pub fn verified_control(&self) -> &VerifiedRecipientControl {
+        &self.verified_control
+    }
+
+    /// Commitment that was approved — convenience getter for settlement adapter.
+    #[must_use]
+    pub fn commitment(&self) -> zwa_protocol::TradeCommitment {
+        self.checked_trade.commitment()
+    }
+
+    /// Intent that was approved.
+    #[must_use]
+    pub fn intent(&self) -> zwa_protocol::TradeIntent {
+        self.checked_trade.intent()
+    }
+}
+
+/// Type alias for spec A7 — `MatcherApproval` is opaque non-serializable approval.
+pub type MatcherApproval = VerifiedTrade;
 
 /// Inputs for gate evaluation — bundles all data the matcher needs.
 #[derive(Debug, Clone)]
@@ -337,12 +441,13 @@ impl<P: ReplayPersistence> MatcherGate<P> {
             .acquire_construction(commitment, input.now)
             .map_err(GateRejection::Replay)?;
 
-        // Step 10: Return verified trade ready for settlement adapter
+        // Step 10: Return verified trade ready for settlement adapter — opaque MatcherApproval
         Ok(VerifiedTrade {
             checked_trade,
             authenticated_issuer_root: auth_issuer,
             authenticated_credential_root: auth_cred,
             verified_control,
+            _private: (),
         })
     }
 }
@@ -504,9 +609,133 @@ mod tests {
     fn gate_allows_valid_private_trade() {
         let (input, gate) = valid_gate_input();
         let verified = gate.evaluate(input).unwrap();
-        assert_eq!(verified.checked_trade.commitment().to_string(), TRADE_COMMITMENT);
-        assert_eq!(verified.authenticated_issuer_root.root().to_string(), ISSUANCE_ROOT);
-        assert_eq!(verified.authenticated_credential_root.root().to_string(), CREDENTIAL_ROOT);
+        assert_eq!(verified.checked_trade().commitment().to_string(), TRADE_COMMITMENT);
+        assert_eq!(verified.authenticated_issuer_root().root().to_string(), ISSUANCE_ROOT);
+        assert_eq!(verified.authenticated_credential_root().root().to_string(), CREDENTIAL_ROOT);
+        // Opaque approval — can get commitment/intent via getters, but cannot Clone or serialize
+        assert_eq!(verified.commitment().to_string(), TRADE_COMMITMENT);
+    }
+
+    #[test]
+    fn verified_trade_is_opaque_non_clone() {
+        // VerifiedTrade / MatcherApproval must be opaque non-serializable
+        // - No Clone (compile-time)
+        // - Private _private field prevents external construction
+        // - Only obtainable via MatcherGate::evaluate()
+        let (input, gate) = valid_gate_input();
+        let verified = gate.evaluate(input).unwrap();
+        // Can access via getters
+        let _commitment = verified.commitment();
+        let _intent = verified.intent();
+        let _checked = verified.checked_trade();
+        let _issuer = verified.authenticated_issuer_root();
+        let _cred = verified.authenticated_credential_root();
+        let _control = verified.verified_control();
+        // Cannot clone — this would fail to compile if uncommented:
+        // let _cloned = verified.clone();
+        // Cannot construct via struct literal — _private is private
+        // let _fake = VerifiedTrade { checked_trade: ..., _private: () }; // fails outside module
+        // Debug is allowed, but Display is not implemented
+        let debug_str = format!("{:?}", verified);
+        assert!(debug_str.contains(\"VerifiedTrade\"));
+    }
+
+    #[test]
+    fn identical_request_twice_does_not_create_two_approvals() {
+        // Spec A7: Identical request twice does not create two approvals
+        let (input, gate) = valid_gate_input();
+        let commitment = input.commitment;
+        // First request → ALLOW, state SETTLEMENT_CONSTRUCTED
+        let first = gate.evaluate(input.clone()).unwrap();
+        assert_eq!(first.commitment().to_string(), TRADE_COMMITMENT);
+        assert_eq!(
+            gate.replay_store().state(commitment),
+            Some(zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed)
+        );
+
+        // Second identical request → BLOCK, not second approval
+        // Must be IllegalState (already constructed) or AlreadyConsumed/AlreadyExpired
+        let (input2, _) = valid_gate_input();
+        let err = gate.evaluate(input2).unwrap_err();
+        match err {
+            GateRejection::IllegalState { .. } => {}
+            GateRejection::AlreadyConsumed => {}
+            other => panic!(\"identical request twice must not create second approval, got {other:?}\"),
+        }
+
+        // Still only one record, still SETTLEMENT_CONSTRUCTED
+        assert_eq!(
+            gate.replay_store().state(commitment),
+            Some(zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed)
+        );
+    }
+
+    #[test]
+    fn no_later_verifier_runs_after_early_failure() {
+        // Spec A7: No later verifier runs after early failure (cheap checks before expensive proofs)
+        // We test that early failures (commitment mismatch, root auth) leave replay store empty,
+        // proving proof verifiers and construction were never reached.
+
+        // Early failure 1: Commitment mismatch (Step 2) — cheapest gate
+        let (mut input, gate) = valid_gate_input();
+        let commitment = input.commitment;
+        assert!(gate.replay_store().state(commitment).is_none(), \"precondition empty\");
+        input.intent.offered_amount = TradeAmount::new(9999);
+        let err = gate.evaluate(input).unwrap_err();
+        match err {
+            GateRejection::CommitmentMismatch { .. } => {}
+            other => panic!(\"expected CommitmentMismatch, got {other:?}\"),
+        }
+        // Replay store must still be empty — no create, no verify, no proof verification, no construction
+        assert!(
+            gate.replay_store().state(commitment).is_none(),
+            \"early commitment mismatch must not create replay record, must not run later verifiers\"
+        );
+
+        // Early failure 2: Root auth failure (Step 3) — before control, replay, proofs
+        let (mut input2, gate2) = valid_gate_input();
+        let commitment2 = input2.commitment;
+        assert!(gate2.replay_store().state(commitment2).is_none());
+        // Tamper issuer envelope to have wrong version → VersionNotCurrent
+        let sk_issuer = signing_key(1);
+        let issuer_payload_bad = zwa_credentials::IssuerRootPayload::new(
+            AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(),
+            IssuerKeyId::new(b\"issuer-atlas\").unwrap(),
+            RootVersion::new(99),
+            UnixSeconds::new(1_900_000_000),
+            UnixSeconds::new(2_100_000_000),
+        )
+        .unwrap();
+        let sig = sk_issuer.sign(&issuer_payload_bad.canonical_bytes());
+        let envelope_bad = zwa_credentials::IssuerRootEnvelope::new(
+            issuer_payload_bad,
+            OpaqueSignature::new(&sig.to_bytes()).unwrap(),
+        );
+        input2.issuer_envelope = envelope_bad;
+        let err = gate2.evaluate(input2).unwrap_err();
+        match err {
+            GateRejection::RootAuth(_) => {}
+            other => panic!(\"expected RootAuth, got {other:?}\"),
+        }
+        assert!(
+            gate2.replay_store().state(commitment2).is_none(),
+            \"root auth failure must not create replay record, must not run control/proof verifiers\"
+        );
+
+        // Early failure 3: Control failure (Step 5) — before replay and proofs
+        let (mut input3, gate3) = valid_gate_input();
+        let commitment3 = input3.commitment;
+        let sk_other = signing_key(99);
+        input3.control_response = RecipientControlResponse::sign(&input3.control_challenge, &sk_other);
+        let err = gate3.evaluate(input3).unwrap_err();
+        match err {
+            GateRejection::Control(_) => {}
+            other => panic!(\"expected Control failure, got {other:?}\"),
+        }
+        assert!(
+            gate3.replay_store().state(commitment3).is_none(),
+            \"control failure must not create replay record, must not run proof verifiers\"
+        );
     }
 
     #[test]
@@ -647,5 +876,139 @@ mod tests {
             GateRejection::IllegalState { .. } => {}
             other => panic!("expected IllegalState for double construction, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a8_integration_real_signatures_real_control_persistent_replay_mock_proofs() {
+        use crate::replay::{JsonFilePersistence, PersistentReplayStore};
+        use std::fs;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("zwa-a8-e2e-{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let commitment = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
+        let sk_issuer = signing_key(1);
+        let vk_issuer = sk_issuer.verifying_key();
+        let issuer_id = IssuerKeyId::new(b"issuer-atlas").unwrap();
+        let mut approved_issuer = BTreeMap::new();
+        approved_issuer.insert(issuer_id.clone(), vk_issuer);
+        let issuer_auth = IssuerRootAuthenticator::new(approved_issuer, RootVersion::new(1));
+        let issuer_payload = zwa_credentials::IssuerRootPayload::new(
+            AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(),
+            issuer_id,
+            RootVersion::new(1),
+            UnixSeconds::new(1_900_000_000),
+            UnixSeconds::new(2_100_000_000),
+        ).unwrap();
+        let sig = sk_issuer.sign(&issuer_payload.canonical_bytes());
+        let issuer_envelope = zwa_credentials::IssuerRootEnvelope::new(
+            issuer_payload,
+            OpaqueSignature::new(&sig.to_bytes()).unwrap(),
+        );
+        let sk_cred = signing_key(2);
+        let vk_cred = sk_cred.verifying_key();
+        let auth_id = AuthorityKeyId::new(b"cred-auth-1").unwrap();
+        let mut approved_cred = BTreeMap::new();
+        approved_cred.insert(auth_id.clone(), vk_cred);
+        let cred_auth = CredentialRootAuthenticator::new(approved_cred, RootVersion::new(1));
+        let cred_payload = zwa_credentials::CredentialRootPayload::new(
+            ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap(),
+            auth_id,
+            RootVersion::new(1),
+            UnixSeconds::new(1_900_000_000),
+            UnixSeconds::new(2_100_000_000),
+        ).unwrap();
+        let sig2 = sk_cred.sign(&cred_payload.canonical_bytes());
+        let cred_envelope = zwa_credentials::CredentialRootEnvelope::new(
+            cred_payload,
+            OpaqueSignature::new(&sig2.to_bytes()).unwrap(),
+        );
+        let sk_control = signing_key(3);
+        let vk_control = sk_control.verifying_key();
+        let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+        let mut approved_control = BTreeMap::new();
+        approved_control.insert(recv_a, vk_control);
+        let control_auth = crate::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
+        let persistence = JsonFilePersistence::new(&path).unwrap();
+        let replay = PersistentReplayStore::new(persistence, 3);
+        let gate = MatcherGate::new(
+            issuer_auth,
+            cred_auth,
+            control_auth,
+            ProvenanceVerifierBackend::default(),
+            EligibilityVerifierBackend::default(),
+            replay,
+        );
+        let now = UnixSeconds::new(1_900_000_100);
+        let challenge = RecipientControlChallenge::new(
+            recv_a,
+            [7u8; 32],
+            CONTROL_DOMAIN.to_vec(),
+            UnixSeconds::new(1_900_000_000),
+            UnixSeconds::new(1_900_000_300),
+            commitment,
+        ).unwrap();
+        let response = RecipientControlResponse::sign(&challenge, &sk_control);
+        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let input = GateInput {
+            intent: golden_intent(),
+            commitment,
+            issuer_envelope,
+            credential_envelope: cred_envelope,
+            approved_receiver: recv_a,
+            control_challenge: challenge,
+            control_response: response,
+            provenance_proof: prov_proof,
+            eligibility_proof: elig_proof,
+            now,
+        };
+        let approval = gate.evaluate(input).unwrap();
+        assert_eq!(approval.commitment().to_string(), TRADE_COMMITMENT);
+        assert!(path.exists());
+        let data = fs::read_to_string(&path).unwrap();
+        assert!(data.contains("schema_version"));
+        drop(gate);
+        let persistence2 = JsonFilePersistence::new(&path).unwrap();
+        assert_eq!(persistence2.load_all().len(), 1);
+        assert_eq!(
+            persistence2.load(commitment).unwrap().state(),
+            zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed,
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a8_integration_real_groth16_proofs_individually_verify() {
+        use crate::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBackend};
+        let prov_backend = ProvenanceVerifierBackend::from_fixture().unwrap();
+        let prov_root = AuthorizedIssuanceRoot::from_decimal_str(
+            "8857867840332676380575934803462643968319857770249975039236308904195120230546",
+        ).unwrap();
+        let prov_commitment = zwa_protocol::TradeCommitment::from_decimal_str(
+            "7409670081847436957289371955571360481923983184454289247710022466448715682310",
+        ).unwrap();
+        let prov_proof_bytes = include_str!("../../tests/fixtures/groth16/provenance-proof.json");
+        let prov_proof = OpaqueProof::new(prov_proof_bytes.as_bytes()).unwrap();
+        let prov_result = prov_backend.verify(prov_root, prov_commitment, &prov_proof);
+        assert_eq!(prov_result, VerificationResult::Valid);
+        let elig_backend = EligibilityVerifierBackend::from_fixture().unwrap();
+        let elig_root = ActiveCredentialRoot::from_decimal_str(
+            "7721491042898277899686830032817687831050368809629386580479309633507500868506",
+        ).unwrap();
+        let elig_commitment = zwa_protocol::TradeCommitment::from_decimal_str(
+            "10187400613857124614980227259922066295752635539032972479692659299555113110306",
+        ).unwrap();
+        let elig_proof_bytes = include_str!("../../tests/fixtures/groth16/eligibility-proof.json");
+        let elig_proof = OpaqueProof::new(elig_proof_bytes.as_bytes()).unwrap();
+        let elig_result = elig_backend.verify(elig_root, elig_commitment, &elig_proof);
+        assert_eq!(elig_result, VerificationResult::Valid);
+        assert_eq!(
+            prov_backend.vk_hash(),
+            "4831d3eef9575ef7daf318eb8767e1a39ef1e26da20339ddda137b1e246f1350"
+        );
+        assert_eq!(
+            elig_backend.vk_hash(),
+            "879d427a16f334edc163e78614c94dfe00c3ae3cb657c3ef4d7d82c39e4f5e75"
+        );
     }
 }

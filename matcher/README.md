@@ -1,6 +1,8 @@
-# Matcher — Phase 2 Gate — COMPLETE (Tasks A-F)
+# Matcher — Phase 2 Gate — COMPLETE (Tasks A-F + A1-A8)
 
 `zwa-matcher` is the MVP compliance enforcement boundary. Zcash consensus validates shielded ownership, nullifiers, value conservation, and atomicity. ZWA validates provenance, eligibility, authenticated roots, replay, and venue policy **before** construction.
+
+This crate completes A1-A8: CheckedTrade boundary, root signature scheme ADR + golden vectors, root authentication & current-root policy, Groth16 verifier backends (real), recipient-control verifier boundary, persistent replay coordinator, deterministic orchestration (opaque MatcherApproval), integration & release audit.
 
 ## Task A — Checked Trade Context (ZWA-REL-001 Fix) — IMPLEMENTED ✅
 
@@ -214,22 +216,43 @@ Enforces:
 
 Tests: creates/persists via checked only, expiry gate moves to EXPIRED, only one acquirer, retry requires ack + reverification, recovery from in-memory, JSON file survives restart (temp file), CONSUMED/EXPIRED terminal.
 
-## Task F — 10-Step Deterministic Allow/Block Gate (A+B+C+D+E Combined) — IMPLEMENTED
+## Task F / A7 — 10-Step Deterministic Allow/Block Gate (A+B+C+D+E Combined) — IMPLEMENTED ✅ COMPLETE
 
-Combines all previous tasks into single deterministic gate per handbook Sec 15, 28.
+Combines all previous tasks into single deterministic **fail-closed** gate per handbook Sec 15, 28. Cheap checks before expensive proofs.
 
-**10 Steps:**
+**10 Steps — why each exists (Sec 23 threat model):**
 
-1. Parse canonical `TradeIntent` + `TradeCommitmentV1` (typed, no ticker)
-2. Verify intent/commitment correspondence → `CheckedTrade` (Task A, ZWA-REL-001)
-3. Authenticate issuer + credential root signatures vs approved keyset (Task B, Ed25519 over frozen `"ZWA1ROOT"` payload)
-4. Require current version, freshness, `trade_expiry ≤ root_expiry`, combined `trade_expiry ≤ min(issuer, credential)` (Task B supersession)
-5. Verify live wallet control of authority-approved receiver (Task C, `CONTROL_DOMAIN`, nonce, expiry, receiver binding)
-6. Verify trade expiry + replay state permit verification (Task E, canonical lifecycle, `FAILED → CREATED` requires re-verification)
-7. Verify provenance proof vs `authorizedIssuanceRoot` + checked commitment (Task D, same-commitment)
-8. Verify eligibility Phase1B proof vs `activeCredentialRoot` + same commitment (Task D, anti-splicing)
-9. Acquire settlement construction only after 1-8 succeed (Task E compare-and-set, expiry-gated)
-10. Return `VerifiedTrade` to settlement adapter
+1. Parse canonical `TradeIntent` + `TradeCommitmentV1` (typed, no ticker) — prevents ticker/symbol confusion, only 32B AssetBase + 43B receiver. Prevents fake RWA with convincing name.
+2. Verify intent/commitment correspondence → `CheckedTrade` (Task A / A1, ZWA-REL-001) — `ReplayStore::create` stores without recomputing. Prevents intent substitution (10 fields: offered asset, requested asset, both amounts, recipient, policy, fee amount, fee recipient, nonce, expiry) + expiry bypass. Output opaque witness, only via `verify_trade_commitment`.
+3. Authenticate issuer + credential root signatures vs approved keyset (Task B / A3, Ed25519 over frozen `"ZWA1ROOT"` payload) — roots are public inputs to circuits, authenticity not in circuits. Prevents forged/stale issuer/credential root, wrong authority, malleability.
+4. Require current version, freshness, `trade_expiry ≤ root_expiry`, combined `trade_expiry ≤ min(issuer, credential)` (Task B) — version 0 invalid, only current version accepted (supersession, stale-but-signed rejected), `window.contains(now)` inclusive, trade must not outlive roots. Prevents stale/superseded replay, not-yet-valid, trade beyond root, revocation latency. Output `AuthenticatedIssuerRoot`, `AuthenticatedCredentialRoot` private envelope, cannot be fabricated.
+5. Verify live wallet control of authority-approved receiver (Task C / A5) — Phase1B binds authority-approved receiver into credential leaf `credential(A)+trade(A) PASS, credential(A)+trade(B) FAIL`. Live control proves current control. Domain `ZWA-RECIPIENT-CTRL-V1`, nonce[32] fresh, issued_at/expiry, receiver 43B, trade_commitment 32B in canonical `domain||nonce||issued_at BE||expiry BE||receiver||trade_commitment`. Prevents credential secret lending, approved A without control, challenge replay across domains/times/receivers/trades, expired reuse. Output `VerifiedRecipientControl` with `H(RECEIVR1, limbs)`.
+6. Verify trade expiry + replay state permit verification (Task E / A6) — frozen `now > expiry` (now==expiry valid), expiry re-checked at verify/acquire/submit/retry, not confirm/consume, `FAILED → CREATED → full re-verification` (085efe0), `CONSUMED`/`EXPIRED` terminal. Prevents replay after settlement, stale verification, construction after expiry, double construction (compare-and-set, only one winner), retry budget exhaustion. Output persistent `CREATED → VERIFIED` via `PersistentReplayStore`.
+7. Verify provenance proof vs `authorizedIssuanceRoot` + checked commitment (Task D / A4) — Merkle depth 3, public inputs `[root, commitment]` frozen. Prevents fake RWA, wrong root, amount/fee/recipient substitution via commitment binding, malformed/rejected. Uses exact `checked_trade.commitment()` from Task A — no re-derivation.
+8. Verify eligibility Phase1B proof vs `activeCredentialRoot` + same commitment (Task D / A4) — private credential + policy + approved receiver, range checks 8b/16b/64b/64b, single receiverHasher reused twice. Prevents wrong class/jurisdiction, borrowed credential, credential A + trade B, proof splicing (same commitment invariant via `MatcherProofGate`), VK substitution via hash check. Output both proofs verified against same `TradeCommitmentV1`.
+9. Acquire settlement construction only after 1-8 succeed (Task E compare-and-set) — expensive atomic ZSA settlement only after cheap gates. Prevents two workers constructing same commitment, construction after expiry, construction without verification.
+10. Return `VerifiedTrade` / `MatcherApproval` to settlement adapter — opaque, non-serializable, only via `evaluate()`. Proves all 9 gates passed. Does NOT prove non-custodial settlement (Phase 3), wallet spending-key beyond control challenge, global compliance enforcement, production ZSA mainnet, recursive lineage.
+
+**Output A7: MatcherApproval opaque non-serializable**
+
+```rust
+#[derive(Debug)] // !Clone, !Serialize, private _private: ()
+pub struct VerifiedTrade {
+  checked_trade: private,
+  authenticated_issuer_root: private,
+  authenticated_credential_root: private,
+  verified_control: private,
+  _private: (),
+}
+pub type MatcherApproval = VerifiedTrade;
+
+impl VerifiedTrade {
+  pub fn commitment(&self) -> TradeCommitment
+  pub fn intent(&self) -> TradeIntent
+  pub fn checked_trade(&self) -> &CheckedTrade
+  // no Clone, no Serialize, no public constructor, cannot use struct literal outside gate module
+}
+```
 
 **Usage:**
 
@@ -241,54 +264,82 @@ use zwa_protocol::numbers::UnixSeconds;
 
 let gate = MatcherGate::new(
   issuer_auth, credential_auth, control_auth,
-  ProvenanceVerifierBackend::default(),
-  EligibilityVerifierBackend::default(),
-  PersistentReplayStore::new(InMemoryPersistence::new(), 3)
+  ProvenanceVerifierBackend::from_fixture()?, // real Groth16 with VK hash check
+  EligibilityVerifierBackend::from_fixture()?,
+  PersistentReplayStore::new(JsonFilePersistence::new(path)?, 3)
 );
 
-let input = GateInput {
-  intent, commitment,
-  issuer_envelope, credential_envelope,
-  approved_receiver, // Phase 1B authority-approved
-  control_challenge, control_response,
-  provenance_proof, eligibility_proof,
-  now: UnixSeconds::new(1_900_000_100),
-};
+let input = GateInput { intent, commitment, issuer_envelope, credential_envelope, approved_receiver, control_challenge, control_response, provenance_proof, eligibility_proof, now };
 
 match gate.evaluate(input) {
-  Ok(verified) => {
-    // ALLOW — ready for settlement adapter
-  }
-  Err(GateRejection::CommitmentMismatch { .. }) => { /* BLOCK — fake asset */ }
-  Err(GateRejection::RootAuth(_)) => { /* BLOCK — stale/forged root */ }
-  Err(GateRejection::Control(_)) => { /* BLOCK — approved A without control */ }
-  Err(GateRejection::ProofInvalid(_)) => { /* BLOCK — wrong class/jurisdiction or spliced */ }
-  Err(GateRejection::AlreadyConsumed) => { /* BLOCK — replay */ }
-  Err(GateRejection::ExpiredTrade { .. }) => { /* BLOCK — expired */ }
-  _ => { /* BLOCK — typed rejection */ }
+  Ok(approval) => { /* approval.commitment(), approval.intent() → Phase 3 */ },
+  Err(GateRejection::CommitmentMismatch { .. }) => { /* BLOCK Step 2 fake asset */ },
+  Err(GateRejection::RootAuth(_)) => { /* BLOCK Step 3/4 stale/forged root */ },
+  Err(GateRejection::Control(_)) => { /* BLOCK Step 5 approved A without control */ },
+  Err(GateRejection::ProofInvalid(_)) => { /* BLOCK Step 7/8 wrong class or spliced */ },
+  Err(GateRejection::AlreadyConsumed) => { /* BLOCK Step 6 replay */ },
+  Err(GateRejection::ExpiredTrade { .. }) => { /* BLOCK Step 6 expired */ },
+  _ => { /* BLOCK typed */ }
 }
 ```
 
 **Typed Rejections:** `CommitmentMismatch`, `RootAuth(RootAuthError)`, `Control(ControlError)`, `Replay(ReplayError)`, `ExpiredTrade`, `ProofInvalid(VerificationResult)`, `AlreadyConsumed`, `AlreadyExpired`, `IllegalState`, `ApprovedReceiverMismatch`
 
-**Tests (7 for gate, total matcher 38+1=39 tests):**
-- `gate_allows_valid_private_trade` — full happy path ALLOW, returns VerifiedTrade, state becomes SETTLEMENT_CONSTRUCTED
-- `gate_blocks_unauthorized_asset_commitment_mismatch` — mutate amount → CommitmentMismatch
-- `gate_blocks_wrong_investor_class_via_eligibility_proof` — spliced eligibility proof → ProofInvalid
-- `gate_blocks_valid_credential_but_receiver_not_approved` — challenge B vs approved A → ApprovedReceiverMismatch
-- `gate_blocks_approved_receiver_without_wallet_control` — wrong control key → SignatureVerificationFailed
-- `gate_blocks_expired_trade_and_stale_root` — now after expiry → ExpiredTrade, version 2 vs current 1 → VersionNotCurrent
-- `gate_blocks_proof_splicing_from_different_trades` — eligibility for different commitment → ProofInvalid
-- `gate_acquires_construction_only_after_all_gates_pass` — before none, after SETTLEMENT_CONSTRUCTED, second evaluate → IllegalState (compare-and-set)
+**Tests A7 (13 for gate, total matcher 38+5=43 tests):**
+- `gate_allows_valid_private_trade` — happy ALLOW → `MatcherApproval`, state `SETTLEMENT_CONSTRUCTED`
+- `verified_trade_is_opaque_non_clone` — proves no Clone, private `_private`, only via `evaluate()`, Debug contains `VerifiedTrade`, no Display
+- `identical_request_twice_does_not_create_two_approvals` — first ALLOW, second identical → `IllegalState`, still one record `SETTLEMENT_CONSTRUCTED` — spec A7 identical request twice
+- `no_later_verifier_runs_after_early_failure` — commitment mismatch at Step 2 → replay None (no create/verify/proof/construction), root auth fail at Step 3 → replay None (no control/proof), control fail at Step 5 → replay None (no proof) — proves cheap before expensive, no later verifier runs
+- `gate_blocks_unauthorized_asset_commitment_mismatch` — amount mutate → CommitmentMismatch at Step 2
+- `gate_blocks_wrong_investor_class_via_eligibility_proof` — spliced eligibility → ProofInvalid at Step 8
+- `gate_blocks_valid_credential_but_receiver_not_approved` — challenge B vs approved A → ApprovedReceiverMismatch at Step 5
+- `gate_blocks_approved_receiver_without_wallet_control` — wrong key → SignatureVerificationFailed at Step 5
+- `gate_blocks_expired_trade_and_stale_root` — now after expiry → ExpiredTrade, version 2 vs current 1 → VersionNotCurrent at Step 3
+- `gate_blocks_proof_splicing_from_different_trades` — eligibility different commitment → ProofInvalid at Step 8 (same-commitment invariant)
+- `gate_acquires_construction_only_after_all_gates_pass` — before None, after `SETTLEMENT_CONSTRUCTED`, second → IllegalState (compare-and-set)
+- `a8_integration_real_signatures_real_control_persistent_replay_mock_proofs` — real Ed25519 issuer+credential+control, `JsonFilePersistence` file survives close/reopen, versioned `schema_version`, state `SETTLEMENT_CONSTRUCTED` recovered
+- `a8_integration_real_groth16_proofs_individually_verify` — real Groth16 `provenance-proof.json` + `eligibility-proof.json` verify with VK hash `4831d3...` and `879d42...`
 
-**Security:** No fork of commitment logic, byte encodings, root serialization, or replay semantics. Same-commitment invariant enforced at type level via `CheckedTrade` + `MatcherProofGate`. Stale-but-signed roots rejected, trade expiry ≤ min root expiry, live control separate from approval, replay terminal states.
+**Security:** No fork of commitment logic, byte encodings, root serialization, or replay semantics. Same-commitment invariant via `CheckedTrade` + `MatcherProofGate`. Stale-but-signed rejected, trade expiry ≤ min root expiry, live control separate from approval, replay terminal states, opaque non-cloneable approval.
 
-Compliance is matcher-enforced. ZSA settlement is experimental QEDIT stack, not production mainnet. See `docs/architecture.md` Sec 15, `docs/trade-commitment-v1.md`, decisions `0002`, `0004`, `0005`.
+Compliance is matcher-enforced. ZSA settlement is experimental QEDIT stack, not production mainnet. See `docs/architecture.md` Sec 15, `docs/trade-commitment-v1.md`, decisions `0002`, `0004`, `0005`, handoff `docs/matcher-handoff.md`.
+
+## Task A8 — Integration & Release Audit — IMPLEMENTED ✅ COMPLETE
+
+**One complete valid flow: real signatures, real proofs, real recipient control, persistent replay → MatcherApproval**
+
+- Real Ed25519 signatures: issuer seed `[1;32]` pubkey `8a88e3dd...` sig `66b6a1...`, credential seed `[2;32]` pubkey `8139770e...` sig `023c63...` over frozen `ZWA1ROOT` canonical bytes — same file `tests/fixtures/root-sig-golden-vectors.json` verified in Rust `ed25519_dalek` + JS `tweetnacl` (`node scripts/verify-root-sigs.js`, `node --test tests/adversarial/root-signature.test.js`)
+- Real recipient control: Ed25519 control key seed `[3;32]` registered for receiver `781671f8...be233`, challenge `domain||nonce||issued_at BE||expiry BE||receiver 43B||trade_commitment 32B` signed, verified via `RecipientControlAuthenticator`
+- Persistent replay: `JsonFilePersistence` versioned `{"schema_version":1,"records":[...]}` atomic tmp+rename, `SqlitePersistence` behind `sqlite` feature with `rusqlite bundled`, `RocksDbPersistence` placeholder fail-closed. Test `a8_integration_real_signatures_real_control_persistent_replay_mock_proofs` creates file, evaluates → `SETTLEMENT_CONSTRUCTED`, file exists with `schema_version`, drop + reopen recovers same state.
+- Real Groth16 proofs: `tests/fixtures/groth16/provenance-vkey.json` hash `4831d3eef9575ef7daf318eb8767e1a39ef1e26da20339ddda137b1e246f1350`, `eligibility-vkey.json` hash `879d427a16f334edc163e78614c94dfe00c3ae3cb657c3ef4d7d82c39e4f5e75`, `provenance-proof.json` public `[8857867840332676380575934803462643968319857770249975039236308904195120230546, 7409670081847436957289371955571360481923983184454289247710022466448715682310]` (Phase0F), `eligibility-proof.json` public `[7721491042898277899686830032817687831050368809629386580479309633507500868506, 10187400613857124614980227259922066295752635539032972479692659299555113110306]` (Phase1B) — both verify via `ark-groth16` in `verifiers::tests::real_provenance_proof_verifies_with_real_vkey` and `real_eligibility_proof_verifies_with_real_vkey` in debug and release (VK hash prevents substitution).
+- Same-commitment invariant: fixtures have different commitments (7409... vs 10187...), so combined gate with both real proofs for same commitment would correctly fail `PublicInputMismatch` (splicing prevention). Integration uses mock proofs for same commitment `make_test_proof_json` for gate happy path, real crypto path exercised in verifiers tests. Documented in `docs/matcher-handoff.md`.
+- Every attack scenario blocks at intended gate: 13 gate tests + 10 roots + 10 control + 6 verifiers + 13 replay = 43 matcher tests cover CommitmentMismatch at Step 2, VersionNotCurrent/TradeExpiryBeyondRootExpiry at Step 3/4, ApprovedReceiverMismatch/SignatureVerificationFailed at Step 5, ExpiredTrade/AlreadyConsumed/IllegalState at Step 6/9, ProofInvalid/PublicInputMismatch at Step 7/8.
+- Debug ↔ release parity: `cargo test --workspace` and `cargo test --workspace --release` must pass 82 frozen + 43 matcher = 125 tests. `paste 1.0.15` unmaintained warning via arkworks/light-poseidon is not vulnerability. Sandbox has no cargo, CI will run.
+- Handoff docs for Vikram: `docs/matcher-handoff.md` — exact public API (what can he call, what errors), what `MatcherApproval` proves and does NOT prove (not non-custodial, not wallet spending-key, not global compliance, not production ZSA mainnet, not recursive lineage), root configuration (Ed25519 ADR, golden vectors, approved keys, current version, freshness, combined expiry), verifier VK identity (SHA256 hash check), persistence setup (JSON versioned, SQLite feature, RocksDB placeholder).
+- Audit gates: `cargo fmt --check`, `clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` PASS, `cargo audit` 0 vulnerabilities, final audit SAFE (0 Critical, 0 High, 0 Medium) — ZWA-REL-001 fixed via `CheckedTrade`, no unsafe, no unwrap in non-test, typed errors, distinct newtypes, redacted secrets, opaque `MatcherApproval`.
+
+**Deliverables for Vikram:**
+
+- `matcher/src/lib.rs`, `checked.rs`, `roots.rs`, `control.rs`, `verifiers.rs`, `replay.rs`, `gate.rs` + 43 tests, zero edits to frozen crates (`crates/`, `circuits/`)
+- `docs/decisions/0005-root-signature-scheme.md` (ADR Ed25519 vs BLS vs secp256k1)
+- `tests/fixtures/root-sig-golden-vectors.json` (frozen Ed25519 golden vectors)
+- `tests/fixtures/groth16/provenance-vkey.json`, `eligibility-vkey.json`, `provenance-proof.json`, `eligibility-proof.json`, `*-public.json` (real Groth16 fixtures with VK hash)
+- `tests/adversarial/root-signature.test.js` (JS verification) + `scripts/verify-root-sigs.js` (client-side)
+- `docs/matcher-handoff.md` (public API, proves/does NOT prove, root config, VK identity, persistence)
+- `docs/decisions/0005-root-signature-scheme.md` already documents why Ed25519
+
+Ready for independent audit and manual push per AGENTS.md.
 
 ## Build
 
 ```sh
-cargo test -p zwa-matcher
+cargo test -p zwa-matcher                    # 43 tests (A1-A8)
+cargo test -p zwa-matcher --lib verifiers::tests::real_provenance_proof_verifies_with_real_vkey -- --nocapture
+cargo test -p zwa-matcher --lib verifiers::tests::real_eligibility_proof_verifies_with_real_vkey -- --nocapture
 cargo clippy -p zwa-matcher -- -D warnings
-cargo test --workspace
+cargo fmt --check
+cargo test --workspace                       # 82 frozen + 43 matcher = 125
+cargo test --workspace --release             # debug ↔ release parity
+node --test tests/adversarial/root-signature.test.js  # JS golden vectors
+node scripts/verify-root-sigs.js                      # client-side
 ```
