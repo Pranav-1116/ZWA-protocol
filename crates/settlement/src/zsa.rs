@@ -220,6 +220,12 @@ impl ZecFeeNote {
     pub fn note_type(&self) -> ZecNoteType {
         self.note_type
     }
+
+    /// Owner receiver of this fee note, if known (None for the matcher's private receiver).
+    #[must_use]
+    pub fn owner_receiver(&self) -> Option<OrchardReceiverBytes> {
+        self.owner_receiver
+    }
 }
 
 /// Opaque atomic ZSA transaction — experimental, only from `MatcherApproval`.

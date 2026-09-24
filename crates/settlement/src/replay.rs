@@ -60,10 +60,9 @@
 
 use std::sync::Arc;
 
-use zwa_matcher::replay::{
-    InMemoryPersistence, JsonFilePersistence, PersistenceError, PersistentReplayStore,
-    ReplayError, ReplayPersistence,
-};
+#[cfg(test)]
+use zwa_matcher::replay::{InMemoryPersistence, JsonFilePersistence};
+use zwa_matcher::replay::{PersistenceError, PersistentReplayStore, ReplayError, ReplayPersistence};
 use zwa_protocol::error::ProtocolError;
 use zwa_protocol::lifecycle::{SettlementTxId as ProtocolTxId, TradeLifecycleState};
 use zwa_protocol::numbers::UnixSeconds;
@@ -325,7 +324,16 @@ impl<P: ReplayPersistence, A: SettlementAdapter> ReplayAwareSettlementAdapter<P,
 
         // Ensure replay record exists — create from approval (only via CheckedTrade), if already exists try verify
         match self.replay.create_from_approval(approval) {
-            Ok(_) => {},
+            Ok(_) => {
+                // Fresh record in CREATED — must move to VERIFIED before acquire_construction.
+                // MatcherApproval is only obtainable from a successful MatcherGate::evaluate,
+                // so full verification has already happened upstream.
+                self.replay
+                    .verify_commitment(commitment, now)
+                    .map_err(|e| SettlementError::ConstructionFailed {
+                        reason: format!("replay verify failed: {e}"),
+                    })?;
+            },
             Err(SettlementReplayError::AlreadyConsumed) => {
                 return Err(SettlementError::ConstructionFailed {
                     reason: "already consumed — terminal".to_string(),

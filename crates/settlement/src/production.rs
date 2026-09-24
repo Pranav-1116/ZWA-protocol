@@ -177,8 +177,23 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
         let commitment = approval.commitment();
 
         // V5: replay — create from approval only via CheckedTrade, then acquire construction (only one winner, expiry-gated)
+        // Flow: create (Created) → verify (Verified) → acquire_construction (SettlementConstructed)
         match self.replay.create_from_approval(approval) {
-            Ok(_) => {},
+            Ok(_) => {
+                // Fresh record in Created state — must verify before acquire_construction
+                match self.replay.verify_commitment(commitment, now) {
+                    Ok(_) => {},
+                    Err(SettlementReplayError::AlreadyConsumed) => {
+                        return Err(ProductionError::Replay(SettlementReplayError::AlreadyConsumed));
+                    },
+                    Err(SettlementReplayError::AlreadyExpired) => {
+                        return Err(ProductionError::Replay(SettlementReplayError::AlreadyExpired));
+                    },
+                    Err(e) => {
+                        return Err(ProductionError::Replay(e));
+                    },
+                }
+            },
             Err(SettlementReplayError::AlreadyConsumed) => {
                 return Err(ProductionError::Replay(SettlementReplayError::AlreadyConsumed));
             },
@@ -186,6 +201,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
                 return Err(ProductionError::Replay(SettlementReplayError::AlreadyExpired));
             },
             Err(_) => {
+                // Record already exists — verify and check state
                 match self.replay.verify_commitment(commitment, now) {
                     Ok(_) => {},
                     Err(SettlementReplayError::AlreadyConsumed) => {

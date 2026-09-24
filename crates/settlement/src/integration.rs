@@ -369,7 +369,7 @@ mod tests {
     use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use zwa_matcher::replay::InMemoryPersistence;
     use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use zwa_matcher::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBackend, make_test_proof_json};
+    use zwa_matcher::verifiers::make_test_proof_json;
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
     use zwa_protocol::proof::OpaqueProof;
