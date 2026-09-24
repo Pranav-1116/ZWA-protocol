@@ -585,13 +585,13 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..10 {
             let exec = executor.clone();
-            let appr = valid_approval();
+            let _appr = valid_approval();
             // Use same commitment for race — need same approval commitment, valid_approval creates same commitment
             // So we use the original approval's commitment via closure capturing
-            let sk_seller = signing_key(10 + i);
-            let sk_buyer = signing_key(20 + i);
-            let buyer_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
-            let seller_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+            let _sk_seller = signing_key(10 + i);
+            let _sk_buyer = signing_key(20 + i);
+            let _buyer_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+            let _seller_recv = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
             let h = thread::spawn(move || {
                 // All threads try to acquire construction for same commitment — only one should win
                 // We directly test acquire, not full execute, to isolate race
@@ -602,7 +602,7 @@ mod tests {
             });
             handles.push(h);
         }
-        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let results: Vec<bool> = handles.into_iter().map(|h: std::thread::JoinHandle<bool>| h.join().unwrap()).collect();
         let winners = results.iter().filter(|&&b| b).count();
         assert_eq!(winners, 1, "only one winner in concurrent acquire, got {winners}");
     }

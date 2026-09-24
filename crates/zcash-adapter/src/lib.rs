@@ -34,6 +34,7 @@
 //! - Not wallet spending-key beyond Ed25519 in MVP
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
+#![allow(missing_docs)]
 
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;

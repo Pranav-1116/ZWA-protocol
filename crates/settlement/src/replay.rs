@@ -61,7 +61,7 @@
 use std::sync::Arc;
 
 use zwa_matcher::replay::{
-    PersistenceError, PersistentReplayStore,
+    InMemoryPersistence, JsonFilePersistence, PersistenceError, PersistentReplayStore,
     ReplayError, ReplayPersistence,
 };
 use zwa_protocol::error::ProtocolError;
