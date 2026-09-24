@@ -647,7 +647,9 @@ impl MatcherProofGate {
 
 /// Helper to create a test proof JSON with given public inputs — mock format
 /// for unit tests that don't need real Groth16. Real proofs are in fixtures.
-#[cfg(test)]
+/// Helper to create a test proof JSON with given public inputs — mock format
+/// for unit tests that don't need real Groth16. Real proofs are in fixtures.
+/// Available to downstream crates for their test code.
 #[must_use]
 pub fn make_test_proof_json(root_decimal: &str, commitment_decimal: &str) -> Vec<u8> {
     let obj = serde_json::json!({

@@ -73,7 +73,7 @@ use zwa_protocol::numbers::UnixSeconds;
 use crate::control::{Ed25519RegistryControlVerifier, RealOrchardIvkControlVerifier};
 use crate::replay::{SettlementReplayCoordinator, SettlementReplayError};
 use crate::zsa::{AtomicZsaTransaction, ExperimentalZsaBuilder, EXPERIMENTAL_ZSA_LABEL, ZSA_STACK_PINS};
-use crate::{MatcherApproval, SettlementDraft, SettlementError, SettlementTxId, MockSettlementAdapter};
+use crate::{MatcherApproval, SettlementAdapter, SettlementDraft, SettlementError, SettlementTxId, MockSettlementAdapter};
 
 /// Production-level settlement coordinator combining V1-V5.
 ///
@@ -684,7 +684,6 @@ mod tests {
             .unwrap_err();
         match err {
             ProductionError::Replay(_) | ProductionError::Settlement(_) => {},
-            _ => {},
         }
     }
 }

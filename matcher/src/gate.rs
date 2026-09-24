@@ -229,6 +229,12 @@ pub struct MatcherGate<P: ReplayPersistence> {
     replay_store: PersistentReplayStore<P>,
 }
 
+impl<P: ReplayPersistence> std::fmt::Debug for MatcherGate<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatcherGate").finish_non_exhaustive()
+    }
+}
+
 impl<P: ReplayPersistence> MatcherGate<P> {
     /// Builds gate with all components.
     #[must_use]

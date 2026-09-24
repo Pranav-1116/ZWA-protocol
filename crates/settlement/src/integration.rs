@@ -45,15 +45,15 @@ use std::collections::BTreeMap;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use zwa_credentials::{CredentialRootEnvelope, IssuerRootEnvelope};
 use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
-use zwa_matcher::replay::{InMemoryPersistence, ReplayPersistence};
+use zwa_matcher::replay::ReplayPersistence;
 use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
 use zwa_matcher::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBackend};
 use zwa_matcher::{GateInput, MatcherGate};
 use zwa_protocol::bytes::{AssetBaseBytes, OrchardReceiverBytes};
-use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
+use zwa_protocol::numbers::{TradeExpiry, UnixSeconds};
 use zwa_protocol::proof::OpaqueProof;
 use zwa_protocol::values::{RecipientCommitment, TradeCommitment};
-use zwa_protocol::{TradeIntent, TradeNonce, TradeAmount, PolicyRoot, MatcherFee, ZatoshiAmount};
+use zwa_protocol::{TradeIntent, TradeNonce, TradeAmount, PolicyRoot, MatcherFee};
 
 use crate::execution::{ExecutionError, SettlementExecutor};
 use crate::production::ProductionSettlementCoordinator;
@@ -112,14 +112,11 @@ impl RfqRequest {
     /// Computes TradeCommitmentV1 via frozen commitment engine — never recompute Poseidon staging.
     ///
     /// Uses `CheckedTrade::new(intent, commitment)` internally via `zwa_matcher::CheckedTrade`
-    /// which calls `verify_trade_commitment` — ZWA-REL-001 fix.
+    /// which calls `trade_commitment_v1` — ZWA-REL-001 fix.
     pub fn compute_commitment(&self) -> Result<TradeCommitment, IntegrationError> {
         let intent = self.to_trade_intent();
-        // Use frozen commitment engine via zwa-commitments
-        let commitment = zwa_commitments::trade::compute_trade_commitment(&intent)
-            .map_err(|e| IntegrationError::CommitmentFailed {
-                reason: format!("compute_trade_commitment failed: {e:?}"),
-            })?;
+        // Use frozen commitment engine via zwa-commitments — pure, infallible
+        let commitment = zwa_commitments::trade::trade_commitment_v1(&intent);
         Ok(commitment)
     }
 }

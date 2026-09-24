@@ -57,8 +57,7 @@ pub mod zsa;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
-use zwa_matcher::{MatcherApproval, VerifiedTrade};
-use zwa_protocol::numbers::TradeExpiry;
+use zwa_matcher::MatcherApproval;
 use zwa_protocol::{TradeCommitment, TradeIntent};
 
 /// Domain for settlement draft canonical bytes — frozen for V1.

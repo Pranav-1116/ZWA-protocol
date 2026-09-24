@@ -45,8 +45,6 @@
 //! - Not production ZSA mainnet — experimental QEDIT branches
 //! - Not instant global revocation
 
-use std::sync::Arc;
-
 use ed25519_dalek::SigningKey;
 use zwa_matcher::replay::ReplayPersistence;
 use zwa_protocol::bytes::OrchardReceiverBytes;
@@ -56,7 +54,7 @@ use zwa_protocol::{TradeCommitment, TradeRecord};
 
 use crate::production::{ProductionError, ProductionSettlementCoordinator};
 use crate::replay::SettlementReplayError;
-use crate::{MatcherApproval, SettlementError, SettlementTxId};
+use crate::{MatcherApproval, SettlementAdapter, SettlementError, SettlementTxId};
 
 /// Errors from settlement execution — typed, fail-closed.
 #[derive(Debug, thiserror::Error)]

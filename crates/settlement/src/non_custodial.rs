@@ -28,7 +28,7 @@
 //! - Not global compliance enforcement — matcher is MVP compliance boundary, Zcash consensus does not enforce investor policy
 //! - Not instant revocation — revocation latency is root refresh interval
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use zeroize::Zeroize;
 
 use crate::{BuyerAuthorization, SellerAuthorization, SettlementDraft, SettlementError};
@@ -432,9 +432,8 @@ mod tests {
         // To enforce expected seller, caller must check seller_vk == expected
         // Here we test that forged sig with fake key still verifies as valid for fake key (not for real)
         // But if matcher tries to create auth with real seller's vk but fake sig, it fails
-        let mut fake_auth_with_real_vk = SellerAuthorization::sign(&draft, fake_seller_sk.inner());
         // Manually set verifying key to real seller's vk but keep fake sig — tamper
-        fake_auth_with_real_vk = SellerAuthorization {
+        let fake_auth_with_real_vk = SellerAuthorization {
             signature: *forged_seller_auth.signature(),
             verifying_key: ed25519_dalek::VerifyingKey::from_bytes(&seller_vk.to_bytes()).unwrap(),
             commitment: draft.commitment(),

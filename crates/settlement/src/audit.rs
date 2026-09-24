@@ -27,7 +27,6 @@ use zwa_matcher::replay::ReplayPersistence;
 use zwa_protocol::bytes::OrchardReceiverBytes;
 
 use crate::execution::SettlementExecutor;
-use crate::integration::EndToEndSettlementCoordinator;
 use crate::production::ProductionSettlementCoordinator;
 use crate::zsa::{ZSA_STACK_PINS, EXPERIMENTAL_ZSA_LABEL};
 
@@ -268,12 +267,12 @@ impl<P: ReplayPersistence + std::fmt::Debug + Clone + 'static> ProductionDeploym
     ) -> Self {
         let production_coordinator = ProductionSettlementCoordinator::with_ed25519_registry(
             persistence.clone(),
-            approved_control_keys,
+            approved_control_keys.clone(),
             max_retries,
         );
         let executor = SettlementExecutor::new(ProductionSettlementCoordinator::with_ed25519_registry(
             persistence,
-            approved_control_keys.clone(),
+            approved_control_keys,
             max_retries,
         ));
         let audit = SecurityAudit::new();

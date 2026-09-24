@@ -378,7 +378,7 @@ pub enum ControlError {
 /// Production implementations must be fail-closed. `UnconfiguredControlVerifier`
 /// returns `Unconfigured` error. Real Ed25519 path is `RecipientControlAuthenticator`.
 /// Test-only fake is `FakeControlVerifier` behind `#[cfg(test)]`.
-pub trait RecipientControlVerifier {
+pub trait RecipientControlVerifier: Send + Sync + std::fmt::Debug {
     /// Verifies control proof for a challenge at `now`.
     fn verify(
         &self,

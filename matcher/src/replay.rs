@@ -104,6 +104,15 @@ pub struct InMemoryPersistence {
     inner: Mutex<BTreeMap<TradeCommitment, TradeRecord>>,
 }
 
+impl Clone for InMemoryPersistence {
+    fn clone(&self) -> Self {
+        let data = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self {
+            inner: Mutex::new(data.clone()),
+        }
+    }
+}
+
 impl InMemoryPersistence {
     #[must_use]
     pub fn new() -> Self {
