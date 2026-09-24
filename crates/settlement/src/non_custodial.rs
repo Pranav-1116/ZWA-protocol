@@ -29,10 +29,15 @@
 //! - Not instant revocation — revocation latency is root refresh interval
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use zeroize::Zeroize;
 
 use crate::{BuyerAuthorization, SellerAuthorization, SettlementDraft, SettlementError};
 
 /// Distinct newtype for seller's signing key — prevents mixing with buyer key at type level.
+///
+/// Zeroizes key bytes on drop — defense-in-depth for non-custodial key material.
+/// Full internal memory zeroization of `ed25519_dalek::SigningKey` requires upstream
+/// support; this zeroes the extracted key copy via `zeroize::Zeroize`.
 #[derive(Debug)]
 pub struct SellerSigningKey(pub SigningKey);
 
@@ -53,7 +58,16 @@ impl SellerSigningKey {
     }
 }
 
+impl Drop for SellerSigningKey {
+    fn drop(&mut self) {
+        let mut bytes = self.0.to_bytes();
+        bytes.zeroize();
+    }
+}
+
 /// Distinct newtype for buyer's signing key — prevents mixing with seller key.
+///
+/// Zeroizes key bytes on drop — defense-in-depth for non-custodial key material.
 #[derive(Debug)]
 pub struct BuyerSigningKey(pub SigningKey);
 
@@ -71,6 +85,13 @@ impl BuyerSigningKey {
     #[must_use]
     pub fn inner(&self) -> &SigningKey {
         &self.0
+    }
+}
+
+impl Drop for BuyerSigningKey {
+    fn drop(&mut self) {
+        let mut bytes = self.0.to_bytes();
+        bytes.zeroize();
     }
 }
 

@@ -113,18 +113,18 @@ impl InMemoryPersistence {
 
 impl ReplayPersistence for InMemoryPersistence {
     fn save(&self, record: &TradeRecord) -> Result<(), PersistenceError> {
-        let mut guard = self.inner.lock().expect("inmemory mutex poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(record.commitment(), *record);
         Ok(())
     }
 
     fn load(&self, commitment: TradeCommitment) -> Option<TradeRecord> {
-        let guard = self.inner.lock().expect("inmemory mutex poisoned");
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.get(&commitment).copied()
     }
 
     fn load_all(&self) -> Vec<TradeRecord> {
-        let guard = self.inner.lock().expect("inmemory mutex poisoned");
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.values().copied().collect()
     }
 }
@@ -353,7 +353,11 @@ impl JsonFilePersistence {
                         "SETTLEMENT_CONSTRUCTED" => {
                             temp_store
                                 .verify(commitment, UnixSeconds::new(1_900_000_000))
-                                .expect("recreate VERIFIED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate VERIFIED failed: {e}"
+                                    ))
+                                })?;
                             rec = temp_store
                                 .acquire_construction(
                                     commitment,
@@ -368,13 +372,21 @@ impl JsonFilePersistence {
                         "SUBMITTED" => {
                             temp_store
                                 .verify(commitment, UnixSeconds::new(1_900_000_000))
-                                .expect("recreate VERIFIED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate VERIFIED failed: {e}"
+                                    ))
+                                })?;
                             temp_store
                                 .acquire_construction(
                                     commitment,
                                     UnixSeconds::new(1_900_000_000),
                                 )
-                                .expect("recreate SETTLEMENT_CONSTRUCTED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate SETTLEMENT_CONSTRUCTED failed: {e}"
+                                    ))
+                                })?;
                             let txid_bytes = pr
                                 .prior_txid_hex
                                 .as_ref()
@@ -396,17 +408,29 @@ impl JsonFilePersistence {
                         "CONFIRMED" => {
                             temp_store
                                 .verify(commitment, UnixSeconds::new(1_900_000_000))
-                                .expect("recreate VERIFIED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate VERIFIED failed: {e}"
+                                    ))
+                                })?;
                             temp_store
                                 .acquire_construction(
                                     commitment,
                                     UnixSeconds::new(1_900_000_000),
                                 )
-                                .expect("recreate SETTLEMENT_CONSTRUCTED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate SETTLEMENT_CONSTRUCTED failed: {e}"
+                                    ))
+                                })?;
                             let txid = SettlementTxId::new([1u8; 32]);
                             temp_store
                                 .submit(commitment, txid, UnixSeconds::new(1_900_000_000))
-                                .expect("recreate SUBMITTED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate SUBMITTED failed: {e}"
+                                    ))
+                                })?;
                             rec = temp_store.confirm(commitment).map_err(|e| {
                                 PersistenceError::Deserialization(format!(
                                     "recreate CONFIRMED failed: {e}"
@@ -416,21 +440,37 @@ impl JsonFilePersistence {
                         "CONSUMED" => {
                             temp_store
                                 .verify(commitment, UnixSeconds::new(1_900_000_000))
-                                .expect("recreate VERIFIED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate VERIFIED failed: {e}"
+                                    ))
+                                })?;
                             temp_store
                                 .acquire_construction(
                                     commitment,
                                     UnixSeconds::new(1_900_000_000),
                                 )
-                                .expect("recreate SETTLEMENT_CONSTRUCTED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate SETTLEMENT_CONSTRUCTED failed: {e}"
+                                    ))
+                                })?;
                             temp_store
                                 .submit(
                                     commitment,
                                     SettlementTxId::new([1u8; 32]),
                                     UnixSeconds::new(1_900_000_000),
                                 )
-                                .expect("recreate SUBMITTED must succeed");
-                            temp_store.confirm(commitment).expect("recreate CONFIRMED must succeed");
+                                .map_err(|e| {
+                                    PersistenceError::Deserialization(format!(
+                                        "recreate SUBMITTED failed: {e}"
+                                    ))
+                                })?;
+                            temp_store.confirm(commitment).map_err(|e| {
+                                PersistenceError::Deserialization(format!(
+                                    "recreate CONFIRMED failed: {e}"
+                                ))
+                            })?;
                             rec = temp_store.consume(commitment).map_err(|e| {
                                 PersistenceError::Deserialization(format!(
                                     "recreate CONSUMED failed: {e}"
@@ -501,19 +541,19 @@ impl JsonFilePersistence {
 
 impl ReplayPersistence for JsonFilePersistence {
     fn save(&self, record: &TradeRecord) -> Result<(), PersistenceError> {
-        let mut guard = self.cache.lock().expect("json cache mutex poisoned");
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(record.commitment(), *record);
         self.flush_to_file(&guard)?;
         Ok(())
     }
 
     fn load(&self, commitment: TradeCommitment) -> Option<TradeRecord> {
-        let guard = self.cache.lock().expect("json cache mutex poisoned");
+        let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         guard.get(&commitment).copied()
     }
 
     fn load_all(&self) -> Vec<TradeRecord> {
-        let guard = self.cache.lock().expect("json cache mutex poisoned");
+        let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         guard.values().copied().collect()
     }
 }
@@ -601,7 +641,7 @@ impl ReplayPersistence for SqlitePersistence {
             .map_err(|e| PersistenceError::Serialization(format!("{e}")))?;
         let commitment_str = record.commitment().to_string();
 
-        let conn = self.conn.lock().expect("sqlite conn mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO replay (commitment, data, schema_version) VALUES (?1, ?2, ?3)",
             rusqlite::params![commitment_str, data, PERSISTENCE_SCHEMA_VERSION],
@@ -612,7 +652,7 @@ impl ReplayPersistence for SqlitePersistence {
 
     fn load(&self, commitment: TradeCommitment) -> Option<TradeRecord> {
         let commitment_str = commitment.to_string();
-        let conn = self.conn.lock().expect("sqlite conn mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare("SELECT data, schema_version FROM replay WHERE commitment = ?1")
             .ok()?;
@@ -706,7 +746,7 @@ impl ReplayPersistence for SqlitePersistence {
     }
 
     fn load_all(&self) -> Vec<TradeRecord> {
-        let conn = self.conn.lock().expect("sqlite conn mutex poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare("SELECT data FROM replay").ok();
         if let Some(stmt) = stmt.as_mut() {
             let rows = stmt
@@ -875,7 +915,7 @@ impl<P: ReplayPersistence> PersistentReplayStore<P> {
     }
 
     fn lock_inner(&self) -> MutexGuard<'_, ReplayStore> {
-        self.inner.lock().expect("replay mutex poisoned")
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Creates a `CREATED` record from checked trade — only approved path.

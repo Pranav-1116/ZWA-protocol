@@ -119,7 +119,8 @@ impl RecipientControlChallenge {
             })?;
 
         let mut nonce = [0u8; 32];
-        getrandom::getrandom(&mut nonce).expect("OsRng failure");
+        getrandom::getrandom(&mut nonce)
+            .map_err(|e| ControlError::RngFailure(format!("{e}")))?;
 
         Self::new(receiver, nonce, domain, issued_at, expiry, trade_commitment)
     }
@@ -322,6 +323,9 @@ pub enum ControlError {
 
     #[error("control domain mismatch: expected {expected:?}, got {got:?}")]
     DomainMismatch { expected: Vec<u8>, got: Vec<u8> },
+
+    #[error("OS random number generator failure: {0}")]
+    RngFailure(String),
 
     #[error("nonce mismatch: expected {expected:?}, got {got:?}")]
     NonceMismatch { expected: [u8; 32], got: [u8; 32] },

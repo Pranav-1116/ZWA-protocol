@@ -21,6 +21,7 @@ ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 getrandom = "0.2"
 sha2 = { workspace = true }
 hex = "0.4.3"
+zeroize = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.31", optional = true, features = ["bundled"] }
 
 [dev-dependencies]
