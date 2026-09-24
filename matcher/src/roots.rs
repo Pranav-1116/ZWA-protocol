@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn canonical_payload_is_not_changed_by_authenticator() {
         // The authenticator must verify exactly the frozen canonical bytes, not a re-encoded version.
-        let sk = signing_key(20);
+        let _sk = signing_key(20);
         let payload = IssuerRootPayload::new(
             AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(),
             IssuerKeyId::new(b"issuer-atlas").unwrap(),

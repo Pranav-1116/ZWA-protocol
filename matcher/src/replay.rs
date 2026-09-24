@@ -602,21 +602,23 @@ impl SqlitePersistence {
         .map_err(|e| PersistenceError::Io(format!("sqlite create table: {e}")))?;
 
         // Check for unknown schema versions in existing rows — reject without migration
-        let mut stmt = conn
-            .prepare("SELECT DISTINCT schema_version FROM replay")
-            .map_err(|e| PersistenceError::Io(format!("sqlite prepare: {e}")))?;
-        let versions: Vec<u32> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| PersistenceError::Io(format!("sqlite query: {e}")))?
-            .collect::<Result<Vec<u32>, _>>()
-            .map_err(|e| PersistenceError::Io(format!("sqlite collect: {e}")))?;
+        {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT schema_version FROM replay")
+                .map_err(|e| PersistenceError::Io(format!("sqlite prepare: {e}")))?;
+            let versions: Vec<u32> = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(|e| PersistenceError::Io(format!("sqlite query: {e}")))?
+                .collect::<Result<Vec<u32>, _>>()
+                .map_err(|e| PersistenceError::Io(format!("sqlite collect: {e}")))?;
 
-        for v in versions {
-            if v != PERSISTENCE_SCHEMA_VERSION {
-                return Err(PersistenceError::UnknownSchemaVersion {
-                    got: v,
-                    expected: PERSISTENCE_SCHEMA_VERSION,
-                });
+            for v in versions {
+                if v != PERSISTENCE_SCHEMA_VERSION {
+                    return Err(PersistenceError::UnknownSchemaVersion {
+                        got: v,
+                        expected: PERSISTENCE_SCHEMA_VERSION,
+                    });
+                }
             }
         }
 

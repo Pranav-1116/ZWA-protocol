@@ -728,7 +728,7 @@ mod tests {
 
         let real_prov_root = AuthorizedIssuanceRoot::from_decimal_str(REAL_PROVENANCE_ROOT).unwrap();
         let real_prov_commitment = TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
-        let real_elig_root = ActiveCredentialRoot::from_decimal_str(REAL_ELIGIBILITY_ROOT).unwrap();
+        let _real_elig_root = ActiveCredentialRoot::from_decimal_str(REAL_ELIGIBILITY_ROOT).unwrap();
         let real_elig_commitment = TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
 
         let prov_proof = load_real_provenance_proof();
@@ -815,7 +815,7 @@ mod tests {
     fn matcher_proof_gate_enforces_same_commitment_with_real_proofs() {
         use crate::checked::CheckedTrade;
         use crate::roots::{
-            AuthenticatedCredentialRoot, AuthenticatedIssuerRoot, CredentialRootAuthenticator,
+            CredentialRootAuthenticator,
             IssuerRootAuthenticator,
         };
         use ed25519_dalek::SigningKey;
@@ -855,7 +855,7 @@ mod tests {
             expiry: TradeExpiry::new(2_000_000_000),
         };
         let commitment = TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
-        let checked = CheckedTrade::new(intent, commitment).unwrap();
+        let _checked = CheckedTrade::new(intent, commitment).unwrap();
 
         // Build authenticated roots for real public inputs
         let sk_issuer = SigningKey::from_bytes(&[1u8; 32]);
