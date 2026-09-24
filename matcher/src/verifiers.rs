@@ -395,7 +395,9 @@ impl ProvenanceVerifierBackend {
 
 impl Default for ProvenanceVerifierBackend {
     fn default() -> Self {
-        Self::from_fixture().expect("provenance vkey fixture must be valid")
+        Self::from_fixture().unwrap_or_else(|e| {
+            panic!("provenance vkey fixture is compile-time embedded — cannot fail: {e}")
+        })
     }
 }
 
@@ -511,7 +513,9 @@ impl EligibilityVerifierBackend {
 
 impl Default for EligibilityVerifierBackend {
     fn default() -> Self {
-        Self::from_fixture().expect("eligibility vkey fixture must be valid")
+        Self::from_fixture().unwrap_or_else(|e| {
+            panic!("eligibility vkey fixture is compile-time embedded — cannot fail: {e}")
+        })
     }
 }
 
