@@ -38,6 +38,7 @@
 //! frozen `TradeCommitmentV1` binding.
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
+#![allow(missing_docs)]
 
 pub mod checked;
 pub mod control;

@@ -37,6 +37,7 @@ use crate::roots::{AuthenticatedCredentialRoot, AuthenticatedIssuerRoot};
 
 /// Errors from Groth16 verification.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Groth16VerificationError {
     #[error("vkey json malformed: {0}")]
     VKeyMalformed(String),
