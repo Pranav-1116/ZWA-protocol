@@ -6,14 +6,14 @@
 //! # V8 Design
 //!
 //! - `SecurityAudit` checks all production guarantees:
-//!   - V1: Opaque boundary only from MatcherApproval, SettlementDraft opaque _private !Clone !Serialize, SellerAuthorization/BuyerAuthorization distinct, Unconfigured fail-closed, canonical ZWA-SETTLE-V1 frozen, Ed25519 deterministic, typed errors, Box<dyn SettlementAdapter> works
+//!   - V1: Opaque boundary only from MatcherApproval, SettlementDraft opaque _private !Clone !Serialize, SellerAuthorization/BuyerAuthorization distinct, Unconfigured fail-closed, canonical ZWA-SETTLE-V1 frozen, Ed25519 deterministic, typed errors, `Box<dyn SettlementAdapter>` works
 //!   - V2: Non-custodial distinct key types SellerSigningKey/BuyerSigningKey distinct newtypes, NonCustodialSettlement opaque only after both distinct sigs, verify_non_custodial checks binding + sigs + same-key rejection, independent_signing_demo machine A/B no sk shared, matcher cannot forge, venue cannot move funds without both sigs
 //!   - V3: Experimental ZSA QEDIT pins 6bcf2c5 (ADR 217b979) zsa-swap 217b979 Zebra 0aef55c librustzcash 5a55da9 orchard d91aaf1 enforced, EXPERIMENTAL label must be shown, canonical mapping preserved AssetBase 32B as_bytes() direct OrchardReceiverBytes 43B as_bytes() direct TradeCommitment 32B BE to_be_bytes() frozen, atomic balanced, fee from MatcherFee, opaque AtomicZsaTransaction
-//!   - V4: Recipient-control MVP Ed25519 registry BTreeMap<OrchardReceiverBytes, VerifyingKey> + CONTROL_DOMAIN preserved, real OrchardIvkBytes 32B private commitment SHA256(ivk) public diversifier 11B transmission_key SHA256(ivk||diversifier) simulation real Pallas mul requires experimental orchard d91aaf1, receiver diversifier||transmission_key 43B preserves mapping, nullifier H(ivk||receiver||trade_commitment) bound to trade, Box<dyn RecipientControlVerifier> works, HybridControlVerifier, why Ed25519 remains MVP documented
-//!   - V5: Replay SettlementReplayCoordinator<P> wraps PersistentReplayStore<P> Mutex<ReplayStore> + persistence every transition save() new() loads load_all() replays to recover state after restart, only via CheckedTrade ZWA-REL-001 fix, lifecycle Created→Verified→SettlementConstructed→Submitted→Confirmed→Consumed Failed→Created→Verified Expired/Consumed terminal, expiry frozen verify/acquire/submit/retry expiry-gated now>expiry→Expired now==expiry valid confirm/consume allowed after expiry, compare-and-set only one winner thread-safe, retry requires re-verification budget 3 txid ack exact, persistence versioned schema_version 1 atomic tmp+rename survives restart corrupted→Deserialization no migration unknown version→UnknownSchemaVersion no overwrite SQLite production-ready RocksDb placeholder fail-closed, ReplayAwareSettlementAdapter enforces replay before construction/submission, typed errors with proper ProtocolError mapping, fail-closed UnconfiguredReplayCoordinator, no unwrap/expect in non-test deny clippy::unwrap_used no unsafe forbid distinct newtypes thread-safe atomic versioned
-//!   - V6: Settlement execution full lifecycle construction→submitted→confirmed→consumed with failure recovery retry requires re-verification budget 3 txid ack exact, expiry handling, concurrent only one winner, Box<dyn SettlementExecutorTrait> works
-//!   - V7: RFQ + matcher + settlement integration private RFQ → canonical TradeIntent + TradeCommitmentV1 via frozen commitment engine, unauthorized asset blocked by provenance, ineligible recipient blocked by eligibility, valid private trade settled atomically with ZEC fee, experimental label preserved, canonical mapping preserved, Box<dyn IntegrationTrait> works
-//!   - V8: Security audit SAFE goal — ZWA-REL-001 fixed via CheckedTrade, no unsafe, no unwrap in non-test, typed errors with proper mapping, distinct newtypes, redacted secrets (SubjectSecret Debug REDACTED), fail-closed defaults, experimental labels preserved, canonical mapping preserved via as_bytes() no re-encoding, QEDIT pins enforced, Box<dyn> works for all traits, thread-safe Mutex, atomic tmp+rename, versioned schema_version 1, SQLite production-ready, RocksDb placeholder fail-closed
+//!   - V4: Recipient-control MVP Ed25519 registry `BTreeMap<OrchardReceiverBytes, VerifyingKey>` + CONTROL_DOMAIN preserved, real OrchardIvkBytes 32B private commitment SHA256(ivk) public diversifier 11B transmission_key SHA256(ivk||diversifier) simulation real Pallas mul requires experimental orchard d91aaf1, receiver diversifier||transmission_key 43B preserves mapping, nullifier H(ivk||receiver||trade_commitment) bound to trade, `Box<dyn RecipientControlVerifier>` works, HybridControlVerifier, why Ed25519 remains MVP documented
+//!   - V5: Replay `SettlementReplayCoordinator<P>` wraps `PersistentReplayStore<P>` `Mutex<ReplayStore>` + persistence every transition save() new() loads load_all() replays to recover state after restart, only via CheckedTrade ZWA-REL-001 fix, lifecycle Created→Verified→SettlementConstructed→Submitted→Confirmed→Consumed Failed→Created→Verified Expired/Consumed terminal, expiry frozen verify/acquire/submit/retry expiry-gated now>expiry→Expired now==expiry valid confirm/consume allowed after expiry, compare-and-set only one winner thread-safe, retry requires re-verification budget 3 txid ack exact, persistence versioned schema_version 1 atomic tmp+rename survives restart corrupted→Deserialization no migration unknown version→UnknownSchemaVersion no overwrite SQLite production-ready RocksDb placeholder fail-closed, ReplayAwareSettlementAdapter enforces replay before construction/submission, typed errors with proper ProtocolError mapping, fail-closed UnconfiguredReplayCoordinator, no unwrap/expect in non-test deny clippy::unwrap_used no unsafe forbid distinct newtypes thread-safe atomic versioned
+//!   - V6: Settlement execution full lifecycle construction→submitted→confirmed→consumed with failure recovery retry requires re-verification budget 3 txid ack exact, expiry handling, concurrent only one winner, `Box<dyn SettlementExecutorTrait>` works
+//!   - V7: RFQ + matcher + settlement integration private RFQ → canonical TradeIntent + TradeCommitmentV1 via frozen commitment engine, unauthorized asset blocked by provenance, ineligible recipient blocked by eligibility, valid private trade settled atomically with ZEC fee, experimental label preserved, canonical mapping preserved, `Box<dyn IntegrationTrait>` works
+//!   - V8: Security audit SAFE goal — ZWA-REL-001 fixed via CheckedTrade, no unsafe, no unwrap in non-test, typed errors with proper mapping, distinct newtypes, redacted secrets (SubjectSecret Debug REDACTED), fail-closed defaults, experimental labels preserved, canonical mapping preserved via as_bytes() no re-encoding, QEDIT pins enforced, `Box<dyn>` works for all traits, thread-safe Mutex, atomic tmp+rename, versioned schema_version 1, SQLite production-ready, RocksDb placeholder fail-closed
 //! - `ProductionDeployment<P>` combines all V1-V8 into final deployment with SAFE goal, provides `verify_production_guarantees()` that checks all invariants
 //! - Typed errors `AuditError` — fail-closed
 //! - `UnconfiguredAudit` fail-closed
@@ -21,7 +21,7 @@
 //!
 //! # SAFE Goal
 //!
-//! - 0 Critical, 0 High, 0 Medium — ZWA-REL-001 fixed, no unsafe, no unwrap in non-test, typed errors, distinct newtypes, redacted secrets, fail-closed, experimental labels, canonical mapping, QEDIT pins, Box<dyn> works, thread-safe, atomic, versioned
+//! - 0 Critical, 0 High, 0 Medium — ZWA-REL-001 fixed, no unsafe, no unwrap in non-test, typed errors, distinct newtypes, redacted secrets, fail-closed, experimental labels, canonical mapping, QEDIT pins, `Box<dyn>` works, thread-safe, atomic, versioned
 
 use zwa_matcher::replay::ReplayPersistence;
 use zwa_protocol::bytes::OrchardReceiverBytes;
@@ -78,7 +78,7 @@ impl SecurityAudit {
     /// - Experimental labels preserved
     /// - Canonical mapping preserved via as_bytes() no re-encoding
     /// - QEDIT pins enforced
-    /// - Box<dyn> works for all traits
+    /// - `Box<dyn>` works for all traits
     /// - ZWA-REL-001 fixed via CheckedTrade
     /// - Lifecycle enforced, expiry frozen, retry budget, persistence versioned
     /// - Thread-safe Mutex, atomic tmp+rename
@@ -327,7 +327,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + Clone + 'static> ProductionDeploym
     }
 }
 
-/// Trait for audit — Box<dyn> must work.
+/// Trait for audit — `Box<dyn>` must work.
 pub trait AuditTrait: Send + Sync + std::fmt::Debug {
     fn verify_production_guarantees(&self) -> AuditResult;
     fn verify_safe_goal(&self) -> bool;

@@ -291,7 +291,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> SettlementExecutor<P> {
     }
 }
 
-/// Trait for settlement execution — Box<dyn> must work.
+/// Trait for settlement execution — `Box<dyn>` must work.
 pub trait SettlementExecutorTrait: Send + Sync + std::fmt::Debug {
     fn execute_production(
         &self,

@@ -24,7 +24,7 @@
 //!    Output: `AuthenticatedIssuerRoot`, `AuthenticatedCredentialRoot` private envelope, cannot be fabricated.
 //!
 //! 5. **Verify live wallet control of authority-approved receiver (Task C + A5)**
-//!    Why: Phase1B binds authority-approved receiver into credential leaf: `credential(A)+trade(A) PASS, credential(A)+trade(B) FAIL`. That prevents lending at circuit level, but not pre-proof secret lending. Live control proves trader currently controls approved receiver. Domain `ZWA-RECIPIENT-CTRL-V1`, nonce[32] fresh, issued_at/expiry, receiver 43B, trade_commitment 32B all in canonical bytes.
+//!    Why: Phase1B binds authority-approved receiver into credential leaf: `credential(A)+trade(A) PASS, credential(A)+trade(B) FAIL`. That prevents lending at circuit level, but not pre-proof secret lending. Live control proves trader currently controls approved receiver. Domain `ZWA-RECIPIENT-CTRL-V1`, nonce\[32\] fresh, issued_at/expiry, receiver 43B, trade_commitment 32B all in canonical bytes.
 //!    Prevents: Credential secret lent to another wallet, approved A without wallet control, challenge replay across domains/times/receivers/trades, expired challenge reuse.
 //!    Output: `VerifiedRecipientControl` with receiver_commitment `H(RECEIVR1, limbs)` canonical.
 //!

@@ -284,7 +284,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
     }
 }
 
-/// Trait for end-to-end integration — Box<dyn> must work.
+/// Trait for end-to-end integration — `Box<dyn>` must work.
 pub trait IntegrationTrait: Send + Sync + std::fmt::Debug {
     // Each argument is a distinct, independently authenticated input to the gate
     // (envelopes, control challenge/response, both proofs, both party keys); bundling
