@@ -68,6 +68,7 @@ pub use roots::{
 };
 pub use verifiers::{EligibilityVerifierBackend, MatcherProofGate, ProvenanceVerifierBackend};
 #[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub use verifiers::make_test_proof_json;
 
 // Re-export frozen crates for matcher consumers so they don't need direct deps.
