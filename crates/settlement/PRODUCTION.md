@@ -160,3 +160,32 @@ unwrap_used = "deny"
 - Not wallet spending-key beyond Ed25519 control challenge in MVP — real Orchard ivk proof is research track requiring experimental orchard d91aaf1 Pallas group hash, wallet ivk export privacy-sensitive (exposes all incoming notes), nullifier requires spend authority ak+nk not just ivk, ZK proof for ivk→receiver without revealing ivk needs new circuit rwa_orchard_control_v1 with Pallas constraints not yet implemented
 - Not distributed lock — Mutex is process-local, distributed would need DB transaction or RocksDB
 - Not order book, AMM, partial fill, routing — MVP scope single trade, no order book, no AMM, no partial fill, no routing system
+
+## Production Hardening Fixes (V1-V8 Gap Closure)
+
+All production gaps identified during V1-V8 audit have been fixed:
+
+1. **matcher/src/replay.rs**: All 20 non-test `.expect()` calls replaced:
+   - Mutex locks: `.expect("...")` → `.unwrap_or_else(|e| e.into_inner())` — mutex recovery instead of panic
+   - State recreation: `.expect("recreate ...")` → `.map_err(|e| PersistenceError::Deserialization(...))?` — typed error propagation
+   - Affects: `InMemoryPersistence`, `JsonFilePersistence`, `SqlitePersistence`, `PersistentReplayStore`
+
+2. **matcher/src/control.rs**: `.expect("OsRng failure")` → typed `ControlError::RngFailure(String)` error variant with `map_err` propagation
+
+3. **non_custodial.rs**: Added `zeroize::Zeroize` Drop impls for `SellerSigningKey` and `BuyerSigningKey` — key bytes zeroized on drop for defense-in-depth
+
+4. **settlement/Cargo.toml**: Added `zeroize = { version = "1", features = ["derive"] }` dependency
+
+5. **Workspace lints enforced** via `[lints] workspace = true` in all Cargo.toml files:
+   - `deny(clippy::unwrap_used)` — no unwrap/expect in non-test code
+   - `forbid(unsafe_code)` — no unsafe in any code
+   - `#![cfg_attr(test, allow(clippy::unwrap_used))]` — test code exempt
+
+### Known Frozen-Crate Gaps (Cannot Modify)
+The frozen crates (`zwa-commitments`, `zwa-credentials`) contain 4 non-test `.expect()` calls on mathematical/static invariants:
+- `crates/commitments/src/poseidon.rs:28` — arkworks BN254 scalar canonical bytes (mathematically guaranteed)
+- `crates/commitments/src/poseidon.rs:55` — Poseidon arity 2-5 (statically guaranteed)
+- `crates/credentials/src/credential.rs:131` — Poseidon arity 6 (statically guaranteed)
+- `crates/credentials/src/credential.rs:171` — Poseidon arity 4 (statically guaranteed)
+
+These are invariants that cannot fail given valid inputs. They violate `deny(clippy::unwrap_used)` at workspace level but are in frozen code that cannot be modified per project constraints.
