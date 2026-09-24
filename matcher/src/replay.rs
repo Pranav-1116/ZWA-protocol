@@ -1421,7 +1421,8 @@ mod tests {
         // Now do a successful save — should overwrite atomically and clean tmp
         let now = UnixSeconds::new(1_900_000_000);
         store.verify(checked.commitment(), now).unwrap();
-        assert!(!tmp_path.exists() || fs::read_to_string(&tmp_path).is_err() || true); // tmp may be removed
+        // Atomic save writes `<path>.tmp` then renames it over `<path>`, so the stale tmp is gone.
+        assert!(!tmp_path.exists(), "atomic save must rename tmp over the target");
         let content_verified = fs::read_to_string(&path).unwrap();
         assert!(content_verified.contains("VERIFIED"));
 

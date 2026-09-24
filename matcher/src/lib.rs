@@ -67,7 +67,6 @@ pub use roots::{
     CredentialRootAuthenticator, IssuerRootAuthenticator, RootAuthError,
 };
 pub use verifiers::{EligibilityVerifierBackend, MatcherProofGate, ProvenanceVerifierBackend};
-#[cfg(test)]
 #[cfg(any(test, feature = "test-helpers"))]
 pub use verifiers::make_test_proof_json;
 

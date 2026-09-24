@@ -911,7 +911,6 @@ mod tests {
         // - Wallet ivk export privacy-sensitive
         // - Nullifier requires spend authority not just ivk
         // - ZK proof for ivk->receiver without revealing ivk needs new circuit rwa_orchard_control_v1
-        // This is documented in module header and this test ensures documentation is present
-        assert!(true, "Ed25519 registry remains MVP, real path is research track");
+        // This is documented in the module header.
     }
 }

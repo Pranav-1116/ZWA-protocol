@@ -846,7 +846,13 @@ mod tests {
 
     #[test]
     fn production_level_no_unwrap_in_non_test() {
-        assert!(true, "production level: no unwrap in non-test, typed errors, distinct newtypes, fail-closed");
+        // Scan this module's own non-test source: no panicking unwrap/expect allowed.
+        let src = include_str!("replay.rs");
+        // Line-ending agnostic: "\nmod tests {" also matches CRLF checkouts.
+        let test_start = src.find("\nmod tests {").expect("test module marker present");
+        let non_test = &src[..test_start];
+        assert!(!non_test.contains(".unwrap()"), "unwrap() in non-test replay code");
+        assert!(!non_test.contains(".expect("), "expect() in non-test replay code");
     }
 
     #[test]

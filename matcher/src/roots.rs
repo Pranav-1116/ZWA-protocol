@@ -697,7 +697,7 @@ mod tests {
     }
 
     fn hex_decode(s: &str) -> Vec<u8> {
-        assert!(s.len() % 2 == 0, "hex length must be even");
+        assert!(s.len().is_multiple_of(2), "hex length must be even");
         let mut out = Vec::with_capacity(s.len() / 2);
         let bytes = s.as_bytes();
         let mut i = 0;
