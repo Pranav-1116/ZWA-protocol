@@ -209,6 +209,10 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
     /// Full end-to-end flow: RFQ → TradeIntent → Commitment → GateInput → MatcherApproval → Settlement Execution.
     ///
     /// This is the production-level V7 flow that enforces all guarantees from V1-V6 plus RFQ boundary.
+    // Each argument is a distinct, independently authenticated input to the gate
+    // (envelopes, control challenge/response, both proofs, both party keys); bundling
+    // them would only move the same 12 fields into a struct at every call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn process_rfq_and_settle(
         &self,
         rfq: &RfqRequest,
@@ -282,6 +286,10 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
 
 /// Trait for end-to-end integration — Box<dyn> must work.
 pub trait IntegrationTrait: Send + Sync + std::fmt::Debug {
+    // Each argument is a distinct, independently authenticated input to the gate
+    // (envelopes, control challenge/response, both proofs, both party keys); bundling
+    // them would only move the same 12 fields into a struct at every call site.
+    #[allow(clippy::too_many_arguments)]
     fn process_rfq_and_settle(
         &self,
         rfq: &RfqRequest,

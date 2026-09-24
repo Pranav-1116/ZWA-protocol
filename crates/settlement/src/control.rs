@@ -459,8 +459,8 @@ impl RecipientControlVerifier for RealOrchardIvkControlVerifier {
 /// Ed25519 registry control verifier — MVP, wraps `RecipientControlAuthenticator`.
 ///
 /// This is the current production path per matcher-handoff. It uses `BTreeMap<OrchardReceiverBytes, VerifyingKey>`
-/// + `CONTROL_DOMAIN = b"ZWA-RECIPIENT-CTRL-V1"`. It is simple, auditable, and does not require experimental orchard crate.
-/// Documented as MVP because real Orchard ivk proof is research track.
+/// together with `CONTROL_DOMAIN = b"ZWA-RECIPIENT-CTRL-V1"`. It is simple, auditable, and does not require
+/// the experimental orchard crate. Documented as MVP because real Orchard ivk proof is research track.
 #[derive(Debug, Clone)]
 pub struct Ed25519RegistryControlVerifier {
     inner: zwa_matcher::control::RecipientControlAuthenticator,
