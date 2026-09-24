@@ -45,6 +45,7 @@
 //! - Replay integration: after `submit()`, caller must call `PersistentReplayStore::submit()`, `confirm()`, `consume()` — settlement does not bypass replay
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
+#![allow(missing_docs)]
 
 pub mod audit;
 pub mod control;
@@ -57,7 +58,7 @@ pub mod zsa;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
-use zwa_matcher::MatcherApproval;
+pub use zwa_matcher::MatcherApproval;
 use zwa_protocol::{TradeCommitment, TradeIntent};
 
 /// Domain for settlement draft canonical bytes — frozen for V1.

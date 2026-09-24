@@ -60,8 +60,10 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zwa_matcher::control::{
     ControlError, RecipientControlChallenge, RecipientControlResponse, RecipientControlVerifier,
-    VerifiedRecipientControl, CONTROL_DOMAIN,
+    VerifiedRecipientControl,
 };
+#[cfg(test)]
+use zwa_matcher::control::CONTROL_DOMAIN;
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;
 
