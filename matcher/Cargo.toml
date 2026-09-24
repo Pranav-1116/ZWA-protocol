@@ -9,6 +9,7 @@ description = "Matcher gate for ZWA Protocol - checked intent/commitment, root a
 [features]
 default = []
 sqlite = ["rusqlite"]
+test-helpers = []
 
 [dependencies]
 zwa-protocol = { path = "../crates/protocol", version = "0.1.0" }

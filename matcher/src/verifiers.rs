@@ -435,8 +435,8 @@ impl ProvenanceVerifier for ProvenanceVerifierBackend {
                 reason: VerificationProblem::ProofRejected,
             },
             Err(_) => {
-                // In test builds, allow mock JSON format for gate tests that don't need real crypto
-                #[cfg(test)]
+                // In test builds and downstream test crates, allow mock JSON format
+                #[cfg(any(test, feature = "test-helpers"))]
                 {
                     if let Ok(mock) = try_parse_mock_proof(proof) {
                         if mock[0] == authorized_issuance_root.to_string()
@@ -458,7 +458,7 @@ impl ProvenanceVerifier for ProvenanceVerifierBackend {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 fn try_parse_mock_proof(proof: &OpaqueProof) -> Result<[String; 2], ()> {
     // Mock format: {"public_inputs": [root, commitment], ...}
     let s = std::str::from_utf8(proof.as_bytes()).map_err(|_| ())?;
@@ -552,7 +552,7 @@ impl EligibilityVerifier for EligibilityVerifierBackend {
                 reason: VerificationProblem::ProofRejected,
             },
             Err(_) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-helpers"))]
                 {
                     if let Ok(mock) = try_parse_mock_proof(proof) {
                         if mock[0] == active_credential_root.to_string()

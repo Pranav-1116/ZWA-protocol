@@ -25,7 +25,7 @@ zeroize = { version = "1", features = ["derive"] }
 rusqlite = { version = "0.31", optional = true, features = ["bundled"] }
 
 [dev-dependencies]
-zwa-matcher = { path = "../../matcher", version = "0.1.0" }
+zwa-matcher = { path = "../../matcher", version = "0.1.0", features = ["test-helpers"] }
 zwa-protocol = { path = "../protocol", version = "0.1.0" }
 zwa-credentials = { path = "../credentials", version = "0.1.0" }
 zwa-commitments = { path = "../commitments", version = "0.1.0" }
