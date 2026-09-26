@@ -174,14 +174,12 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
         buyer_receiver: Option<OrchardReceiverBytes>,
         now: UnixSeconds,
     ) -> Result<(SettlementDraft, AtomicZsaTransaction), ProductionError> {
-        let commitment = approval.commitment();
-
         // V5: replay — create from approval only via CheckedTrade, then acquire construction (only one winner, expiry-gated)
         // Flow: create (Created) → verify (Verified) → acquire_construction (SettlementConstructed)
         match self.replay.create_from_approval(approval) {
             Ok(_) => {
                 // Fresh record in Created state — must verify before acquire_construction
-                match self.replay.verify_commitment(commitment, now) {
+                match self.replay.verify_commitment(approval, now) {
                     Ok(_) => {},
                     Err(SettlementReplayError::AlreadyConsumed) => {
                         return Err(ProductionError::Replay(SettlementReplayError::AlreadyConsumed));
@@ -202,7 +200,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
             },
             Err(_) => {
                 // Record already exists — verify and check state
-                match self.replay.verify_commitment(commitment, now) {
+                match self.replay.verify_commitment(approval, now) {
                     Ok(_) => {},
                     Err(SettlementReplayError::AlreadyConsumed) => {
                         return Err(ProductionError::Replay(SettlementReplayError::AlreadyConsumed));
@@ -216,7 +214,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
         }
 
         self.replay
-            .acquire_settlement_construction(commitment, now)
+            .acquire_settlement_construction(approval, now)
             .map_err(ProductionError::Replay)?;
 
         // V1: construct draft only from approval, expiry-gated
@@ -352,9 +350,7 @@ mod tests {
     use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use zwa_matcher::replay::InMemoryPersistence;
     use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use zwa_matcher::verifiers::{
-        EligibilityVerifierBackend, ProvenanceVerifierBackend, make_test_proof_json,
-    };
+    use crate::test_support::{subject_commitment, test_proof, TestGate, TestProofVerifier};
     use zwa_matcher::{GateInput, MatcherGate};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
@@ -394,7 +390,7 @@ mod tests {
         }
     }
 
-    fn build_gate() -> (MatcherGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
+    fn build_gate() -> (TestGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
         let sk_issuer = signing_key(1);
         let vk_issuer = sk_issuer.verifying_key();
         let issuer_id = IssuerKeyId::new(b"issuer-atlas").unwrap();
@@ -436,14 +432,14 @@ mod tests {
         approved_control.insert(recv_a, vk_control);
         let control_auth = zwa_matcher::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
 
-        let replay = zwa_matcher::replay::PersistentReplayStore::new(InMemoryPersistence::new(), 3);
+        let replay = zwa_matcher::replay::PersistentReplayStore::new(InMemoryPersistence::new(), 3).unwrap();
 
         let gate = MatcherGate::new(
             issuer_auth,
             cred_auth,
             control_auth,
-            ProvenanceVerifierBackend::default(),
-            EligibilityVerifierBackend::default(),
+            TestProofVerifier,
+            TestProofVerifier,
             replay,
         );
 
@@ -467,8 +463,8 @@ mod tests {
         .unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
 
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
 
         let input = GateInput {
             intent,
@@ -476,6 +472,7 @@ mod tests {
             issuer_envelope,
             credential_envelope: cred_envelope,
             approved_receiver: recv_a,
+            recipient_subject_commitment: subject_commitment(),
             control_challenge: challenge,
             control_response: response,
             provenance_proof: prov_proof,
@@ -533,7 +530,7 @@ mod tests {
         assert_eq!(verified.receiver(), &recv_a);
 
         assert_eq!(
-            coordinator.replay().state(approval.commitment()),
+            coordinator.replay().state(approval.commitment()).unwrap(),
             Some(zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed)
         );
 
@@ -549,7 +546,7 @@ mod tests {
         let txid = coordinator.submit_production(draft_mut).unwrap();
         assert_eq!(txid.as_bytes().len(), 32);
         assert_eq!(
-            coordinator.replay().state(approval.commitment()),
+            coordinator.replay().state(approval.commitment()).unwrap(),
             Some(zwa_protocol::lifecycle::TradeLifecycleState::Submitted)
         );
     }

@@ -46,11 +46,11 @@
 //! - Not instant global revocation
 
 use ed25519_dalek::SigningKey;
-use zwa_matcher::replay::ReplayPersistence;
+use zwa_matcher::replay::{ReplayPersistence, ReplayRecord};
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::lifecycle::{FailureReason, SettlementTxId as ProtocolTxId, TradeLifecycleState};
 use zwa_protocol::numbers::UnixSeconds;
-use zwa_protocol::{TradeCommitment, TradeRecord};
+use zwa_protocol::TradeCommitment;
 
 use crate::production::{ProductionError, ProductionSettlementCoordinator};
 use crate::replay::SettlementReplayError;
@@ -201,7 +201,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> SettlementExecutor<P> {
     pub fn confirm_production(
         &self,
         commitment: TradeCommitment,
-    ) -> Result<TradeRecord, ExecutionError> {
+    ) -> Result<ReplayRecord, ExecutionError> {
         let rec = self
             .coordinator
             .replay()
@@ -214,7 +214,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> SettlementExecutor<P> {
     pub fn consume_production(
         &self,
         commitment: TradeCommitment,
-    ) -> Result<TradeRecord, ExecutionError> {
+    ) -> Result<ReplayRecord, ExecutionError> {
         let rec = self
             .coordinator
             .replay()
@@ -228,7 +228,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> SettlementExecutor<P> {
         &self,
         commitment: TradeCommitment,
         reason: FailureReason,
-    ) -> Result<TradeRecord, ExecutionError> {
+    ) -> Result<ReplayRecord, ExecutionError> {
         let rec = self
             .coordinator
             .replay()
@@ -243,7 +243,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> SettlementExecutor<P> {
         commitment: TradeCommitment,
         acknowledged_txid: Option<ProtocolTxId>,
         now: UnixSeconds,
-    ) -> Result<TradeRecord, ExecutionError> {
+    ) -> Result<ReplayRecord, ExecutionError> {
         let rec = self
             .coordinator
             .replay()
@@ -257,7 +257,7 @@ impl<P: ReplayPersistence + std::fmt::Debug> SettlementExecutor<P> {
         &self,
         commitment: TradeCommitment,
         now: UnixSeconds,
-    ) -> Result<TradeRecord, ExecutionError> {
+    ) -> Result<ReplayRecord, ExecutionError> {
         let rec = self
             .coordinator
             .replay()
@@ -267,15 +267,19 @@ impl<P: ReplayPersistence + std::fmt::Debug> SettlementExecutor<P> {
     }
 
     /// Returns current lifecycle state.
-    #[must_use]
-    pub fn state(&self, commitment: TradeCommitment) -> Option<TradeLifecycleState> {
-        self.coordinator.replay().state(commitment)
+    ///
+    /// # Errors
+    /// Fails closed if the persisted record cannot be loaded or validated.
+    pub fn state(&self, commitment: TradeCommitment) -> Result<Option<TradeLifecycleState>, ExecutionError> {
+        self.coordinator.replay().state(commitment).map_err(ExecutionError::Replay)
     }
 
     /// Returns record if any.
-    #[must_use]
-    pub fn get(&self, commitment: TradeCommitment) -> Option<TradeRecord> {
-        self.coordinator.replay().get(commitment)
+    ///
+    /// # Errors
+    /// Fails closed if the persisted record cannot be loaded or validated.
+    pub fn get(&self, commitment: TradeCommitment) -> Result<Option<ReplayRecord>, ExecutionError> {
+        self.coordinator.replay().get(commitment).map_err(ExecutionError::Replay)
     }
 
     /// Returns experimental label.
@@ -360,7 +364,7 @@ mod tests {
     use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use zwa_matcher::replay::InMemoryPersistence;
     use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use zwa_matcher::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBackend, make_test_proof_json};
+    use crate::test_support::{subject_commitment, test_proof, TestGate, TestProofVerifier};
     use zwa_matcher::{GateInput, MatcherGate};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::lifecycle::TradeLifecycleState;
@@ -397,7 +401,7 @@ mod tests {
         }
     }
 
-    fn build_gate() -> (MatcherGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
+    fn build_gate() -> (TestGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
         let sk_issuer = signing_key(1);
         let vk_issuer = sk_issuer.verifying_key();
         let issuer_id = IssuerKeyId::new(b"issuer-atlas").unwrap();
@@ -422,8 +426,8 @@ mod tests {
         let mut approved_control = BTreeMap::new();
         approved_control.insert(recv_a, vk_control);
         let control_auth = zwa_matcher::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
-        let replay = zwa_matcher::replay::PersistentReplayStore::new(InMemoryPersistence::new(), 3);
-        let gate = MatcherGate::new(issuer_auth, cred_auth, control_auth, ProvenanceVerifierBackend::default(), EligibilityVerifierBackend::default(), replay);
+        let replay = zwa_matcher::replay::PersistentReplayStore::new(InMemoryPersistence::new(), 3).unwrap();
+        let gate = MatcherGate::new(issuer_auth, cred_auth, control_auth, TestProofVerifier, TestProofVerifier, replay);
         (gate, recv_a, issuer_envelope, cred_envelope, sk_control)
     }
 
@@ -434,9 +438,9 @@ mod tests {
         let now = UnixSeconds::new(1_900_000_100);
         let challenge = RecipientControlChallenge::new(recv_a, [7u8; 32], CONTROL_DOMAIN.to_vec(), UnixSeconds::new(1_900_000_000), UnixSeconds::new(2_100_000_000), commitment).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
-        let input = GateInput { intent, commitment, issuer_envelope, credential_envelope: cred_envelope, approved_receiver: recv_a, control_challenge: challenge, control_response: response, provenance_proof: prov_proof, eligibility_proof: elig_proof, now };
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let input = GateInput { intent, commitment, issuer_envelope, credential_envelope: cred_envelope, approved_receiver: recv_a, recipient_subject_commitment: subject_commitment(), control_challenge: challenge, control_response: response, provenance_proof: prov_proof, eligibility_proof: elig_proof, now };
         gate.evaluate(input).unwrap()
     }
 
@@ -460,7 +464,7 @@ mod tests {
             .execute_production(&approval, &sk_seller, &sk_buyer, Some(seller_recv), Some(buyer_recv))
             .unwrap();
         assert_eq!(txid.as_bytes().len(), 32);
-        assert_eq!(executor.state(approval.commitment()), Some(TradeLifecycleState::Submitted));
+        assert_eq!(executor.state(approval.commitment()).unwrap(), Some(TradeLifecycleState::Submitted));
 
         // Confirm and consume
         let rec_confirmed = executor.confirm_production(approval.commitment()).unwrap();
@@ -579,13 +583,13 @@ mod tests {
         executor
             .coordinator
             .replay()
-            .verify_commitment(commitment, UnixSeconds::new(1_900_000_000))
+            .verify_commitment(&approval, UnixSeconds::new(1_900_000_000))
             .unwrap();
 
         let mut handles = Vec::new();
         for i in 0..10 {
             let exec = executor.clone();
-            let _appr = valid_approval();
+            let appr = valid_approval();
             // Use same commitment for race — need same approval commitment, valid_approval creates same commitment
             // So we use the original approval's commitment via closure capturing
             let _sk_seller = signing_key(10 + i);
@@ -597,7 +601,7 @@ mod tests {
                 // We directly test acquire, not full execute, to isolate race
                 exec.coordinator
                     .replay()
-                    .acquire_settlement_construction(commitment, UnixSeconds::new(1_900_000_100))
+                    .acquire_settlement_construction(&appr, UnixSeconds::new(1_900_000_100))
                     .is_ok()
             });
             handles.push(h);

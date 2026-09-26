@@ -55,6 +55,8 @@ pub mod non_custodial;
 pub mod production;
 pub mod replay;
 pub mod zsa;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -596,7 +598,7 @@ mod tests {
     use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use zwa_matcher::replay::{InMemoryPersistence, PersistentReplayStore};
     use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use zwa_matcher::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBackend, make_test_proof_json};
+    use crate::test_support::{subject_commitment, test_proof, TestGate, TestProofVerifier};
     use zwa_matcher::{GateInput, MatcherGate};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
@@ -636,7 +638,7 @@ mod tests {
         }
     }
 
-    fn build_gate() -> (MatcherGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
+    fn build_gate() -> (TestGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
         let sk_issuer = signing_key(1);
         let vk_issuer = sk_issuer.verifying_key();
         let issuer_id = IssuerKeyId::new(b"issuer-atlas").unwrap();
@@ -678,14 +680,14 @@ mod tests {
         approved_control.insert(recv_a, vk_control);
         let control_auth = zwa_matcher::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
 
-        let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3);
+        let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3).unwrap();
 
         let gate = MatcherGate::new(
             issuer_auth,
             cred_auth,
             control_auth,
-            ProvenanceVerifierBackend::default(),
-            EligibilityVerifierBackend::default(),
+            TestProofVerifier,
+            TestProofVerifier,
             replay,
         );
 
@@ -709,8 +711,8 @@ mod tests {
         .unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
 
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
 
         let input = GateInput {
             intent,
@@ -718,6 +720,7 @@ mod tests {
             issuer_envelope,
             credential_envelope: cred_envelope,
             approved_receiver: recv_a,
+            recipient_subject_commitment: subject_commitment(),
             control_challenge: challenge,
             control_response: response,
             provenance_proof: prov_proof,

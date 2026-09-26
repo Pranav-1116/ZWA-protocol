@@ -245,14 +245,16 @@ mod tests {
     use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use zwa_matcher::replay::{InMemoryPersistence, PersistentReplayStore};
     use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use zwa_matcher::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBackend, make_test_proof_json};
     use zwa_matcher::{GateInput, MatcherGate};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
-    use zwa_protocol::proof::OpaqueProof;
+    use zwa_protocol::proof::{
+        EligibilityVerifier, OpaqueProof, ProvenanceVerifier, VerificationProblem, VerificationResult,
+    };
     use zwa_protocol::{
         AssetBaseBytes, AuthorizedIssuanceRoot, ActiveCredentialRoot, MatcherFee, OpaqueSignature,
-        PolicyRoot, RecipientCommitment, TradeAmount, TradeNonce, ZatoshiAmount, TradeIntent,
+        PolicyRoot, RecipientCommitment, SubjectCommitment, TradeAmount, TradeCommitment, TradeNonce,
+        ZatoshiAmount, TradeIntent,
     };
     use ed25519_dalek::Signer;
 
@@ -260,6 +262,45 @@ mod tests {
     const CREDENTIAL_ROOT: &str = "7239536478138432754387625126231950010993505962177483323536139232738771167323";
     const TRADE_COMMITMENT: &str = "10187400613857124614980227259922066295752635539032972479692659299555113110306";
     const RECEIVER_A_HEX: &str = "781671f8a41294c866d8161f3bf5f84a8fd2c328f91a2d085a66036acd59439731c36c4f1b99b4d64be233";
+
+    /// Phase 0G subject commitment for the golden recipient (F-02 receiver binding).
+    const SUBJECT_COMMITMENT: &str = "8182499163832458428983635402341439692935005683808059285091898351261831993662";
+
+    /// Test-only proof verifier injected through the frozen traits (the matcher
+    /// has no mock-proof fallback in any build — M2 remediation F-01). Accepts
+    /// only `test_proof(root, commitment)` for the exact root and commitment.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct TestProofVerifier;
+
+    impl TestProofVerifier {
+        fn check(root: String, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+            if proof.as_bytes() == test_proof(&root, &commitment.to_string()).as_slice() {
+                VerificationResult::Valid
+            } else {
+                VerificationResult::Invalid {
+                    reason: VerificationProblem::ProofRejected,
+                }
+            }
+        }
+    }
+
+    impl ProvenanceVerifier for TestProofVerifier {
+        fn verify(&self, root: AuthorizedIssuanceRoot, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+            Self::check(root.to_string(), commitment, proof)
+        }
+    }
+
+    impl EligibilityVerifier for TestProofVerifier {
+        fn verify(&self, root: ActiveCredentialRoot, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+            Self::check(root.to_string(), commitment, proof)
+        }
+    }
+
+    fn test_proof(root: &str, commitment: &str) -> Vec<u8> {
+        format!("zwa-adapter-test-proof|{root}|{commitment}").into_bytes()
+    }
+
+    type TestGate<P> = MatcherGate<P, TestProofVerifier, TestProofVerifier>;
 
     fn signing_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
@@ -281,7 +322,7 @@ mod tests {
         }
     }
 
-    fn build_gate() -> (MatcherGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
+    fn build_gate() -> (TestGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
         let sk_issuer = signing_key(1);
         let vk_issuer = sk_issuer.verifying_key();
         let issuer_id = IssuerKeyId::new(b"issuer-atlas").unwrap();
@@ -306,8 +347,8 @@ mod tests {
         let mut approved_control = BTreeMap::new();
         approved_control.insert(recv_a, vk_control);
         let control_auth = zwa_matcher::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
-        let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3);
-        let gate = MatcherGate::new(issuer_auth, cred_auth, control_auth, ProvenanceVerifierBackend::default(), EligibilityVerifierBackend::default(), replay);
+        let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3).unwrap();
+        let gate = MatcherGate::new(issuer_auth, cred_auth, control_auth, TestProofVerifier, TestProofVerifier, replay);
         (gate, recv_a, issuer_envelope, cred_envelope, sk_control)
     }
 
@@ -318,9 +359,9 @@ mod tests {
         let now = UnixSeconds::new(1_900_000_100);
         let challenge = RecipientControlChallenge::new(recv_a, [7u8; 32], CONTROL_DOMAIN.to_vec(), UnixSeconds::new(1_900_000_000), UnixSeconds::new(2_100_000_000), commitment).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
-        let input = GateInput { intent, commitment, issuer_envelope, credential_envelope: cred_envelope, approved_receiver: recv_a, control_challenge: challenge, control_response: response, provenance_proof: prov_proof, eligibility_proof: elig_proof, now };
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let input = GateInput { intent, commitment, issuer_envelope, credential_envelope: cred_envelope, approved_receiver: recv_a, recipient_subject_commitment: SubjectCommitment::from_decimal_str(SUBJECT_COMMITMENT).unwrap(), control_challenge: challenge, control_response: response, provenance_proof: prov_proof, eligibility_proof: elig_proof, now };
         gate.evaluate(input).unwrap()
     }
 

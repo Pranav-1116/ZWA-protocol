@@ -10,7 +10,7 @@
 //!   `Created → Verified → SettlementConstructed → Submitted → Confirmed → Consumed`,
 //!   `Failed → Created → Verified` (085efe0), `Expired` terminal, `Consumed` terminal.
 //! - `ReplayPersistence` trait: `save`, `load`, `load_all`, `delete` — pluggable backend.
-//!   - `InMemoryPersistence`: `Mutex<BTreeMap<TradeCommitment, TradeRecord>>`, for tests.
+//!   - `InMemoryPersistence`: `Mutex<BTreeMap<TradeCommitment, ReplayRecord>>`, for tests.
 //!   - `JsonFilePersistence`: versioned `{"schema_version":1,"records":[...]}`, atomic `tmp+rename`,
 //!     survives restart, corrupted → `Deserialization` without migration, unknown version → `UnknownSchemaVersion`.
 //!   - `SqlitePersistence` behind `sqlite` feature: `rusqlite` bundled, production-ready.
@@ -19,7 +19,7 @@
 //!   `new()` loads `load_all()` and replays transitions to reach state, thread-safe compare-and-set.
 //! - `SettlementReplayCoordinator<P>`: wraps `PersistentReplayStore<P>` and enforces settlement lifecycle:
 //!   - `create_from_approval(&MatcherApproval)` only via `CheckedTrade` (ZWA-REL-001 fix) — no raw intent.
-//!   - `acquire_settlement_construction(commitment, now)` compare-and-set, only one winner.
+//!   - `acquire_settlement_construction(approval, now)` compare-and-set, only one winner.
 //!   - `submit_settlement(commitment, txid, now)` expiry-gated.
 //!   - `confirm_settlement` / `consume_settlement` allowed after expiry if submission valid.
 //!   - `retry_after_failure` requires full re-verification, retry budget 3, txid ack exact.
@@ -62,11 +62,11 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use zwa_matcher::replay::{InMemoryPersistence, JsonFilePersistence};
-use zwa_matcher::replay::{PersistenceError, PersistentReplayStore, ReplayError, ReplayPersistence};
+use zwa_matcher::replay::{PersistenceError, PersistentReplayStore, ReplayError, ReplayPersistence, ReplayRecord};
 use zwa_protocol::error::ProtocolError;
 use zwa_protocol::lifecycle::{SettlementTxId as ProtocolTxId, TradeLifecycleState};
 use zwa_protocol::numbers::UnixSeconds;
-use zwa_protocol::{TradeCommitment, TradeRecord};
+use zwa_protocol::TradeCommitment;
 
 use crate::{MatcherApproval, SettlementDraft, SettlementError, SettlementTxId, SettlementAdapter};
 
@@ -140,14 +140,15 @@ pub struct SettlementReplayCoordinator<P: ReplayPersistence> {
 }
 
 impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
-    /// Builds coordinator with persistence, loading all existing records.
+    /// Builds coordinator with persistence.
     ///
-    /// Loads all records from `persistence.load_all()` into inner `ReplayStore` via transitions,
-    /// recovering state after restart. Thread-safe via `Mutex<ReplayStore>`.
+    /// The matcher store keeps no in-memory lifecycle state: every operation
+    /// loads the complete record from `persistence` and commits by CAS, and a
+    /// corrupted or unreadable record fails closed on access (`lazy` store).
     #[must_use]
     pub fn new(persistence: P, max_retries: u32) -> Self {
         Self {
-            inner: PersistentReplayStore::new(persistence, max_retries),
+            inner: PersistentReplayStore::lazy(persistence, max_retries),
         }
     }
 
@@ -167,24 +168,28 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
     pub fn create_from_approval(
         &self,
         approval: &MatcherApproval,
-    ) -> Result<TradeRecord, SettlementReplayError> {
-        let checked = approval.checked_trade();
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self
             .inner
-            .create_checked(checked)
+            .create_from_approval(approval)
             .map_err(map_replay_error)?;
         Ok(record)
     }
 
     /// `CREATED → VERIFIED` after current matcher verification.
     ///
-    /// Expiry-gated: `now > expiry` → Expired terminal.
+    /// Requires the `MatcherApproval` (only obtainable from a fully passing
+    /// `MatcherGate::evaluate`) for this trade. Expiry-gated: `now > expiry` →
+    /// Expired terminal.
     pub fn verify_commitment(
         &self,
-        commitment: TradeCommitment,
+        approval: &MatcherApproval,
         now: UnixSeconds,
-    ) -> Result<TradeRecord, SettlementReplayError> {
-        let record = self.inner.verify(commitment, now).map_err(map_replay_error)?;
+    ) -> Result<ReplayRecord, SettlementReplayError> {
+        let record = self
+            .inner
+            .verify_approved(approval, now)
+            .map_err(map_replay_error)?;
         Ok(record)
     }
 
@@ -193,12 +198,12 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
     /// Expiry-gated, thread-safe via `Mutex<ReplayStore>`.
     pub fn acquire_settlement_construction(
         &self,
-        commitment: TradeCommitment,
+        approval: &MatcherApproval,
         now: UnixSeconds,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self
             .inner
-            .acquire_construction(commitment, now)
+            .acquire_construction_approved(approval, now)
             .map_err(map_replay_error)?;
         Ok(record)
     }
@@ -209,7 +214,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         commitment: TradeCommitment,
         txid: ProtocolTxId,
         now: UnixSeconds,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self
             .inner
             .submit(commitment, txid, now)
@@ -221,7 +226,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
     pub fn confirm_settlement(
         &self,
         commitment: TradeCommitment,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self.inner.confirm(commitment).map_err(map_replay_error)?;
         Ok(record)
     }
@@ -230,7 +235,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
     pub fn consume_settlement(
         &self,
         commitment: TradeCommitment,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self.inner.consume(commitment).map_err(map_replay_error)?;
         Ok(record)
     }
@@ -240,7 +245,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         &self,
         commitment: TradeCommitment,
         reason: zwa_protocol::lifecycle::FailureReason,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self.inner.fail(commitment, reason).map_err(map_replay_error)?;
         Ok(record)
     }
@@ -250,7 +255,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         &self,
         commitment: TradeCommitment,
         now: UnixSeconds,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self.inner.expire(commitment, now).map_err(map_replay_error)?;
         Ok(record)
     }
@@ -261,7 +266,7 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
         commitment: TradeCommitment,
         acknowledged_txid: Option<ProtocolTxId>,
         now: UnixSeconds,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         let record = self
             .inner
             .retry_after_failure(commitment, acknowledged_txid, now)
@@ -270,15 +275,22 @@ impl<P: ReplayPersistence> SettlementReplayCoordinator<P> {
     }
 
     /// Returns current lifecycle state for commitment, if any.
-    #[must_use]
-    pub fn state(&self, commitment: TradeCommitment) -> Option<TradeLifecycleState> {
-        self.inner.state(commitment)
+    ///
+    /// # Errors
+    /// Fails closed if the persisted record cannot be loaded or validated.
+    pub fn state(
+        &self,
+        commitment: TradeCommitment,
+    ) -> Result<Option<TradeLifecycleState>, SettlementReplayError> {
+        self.inner.state(commitment).map_err(map_replay_error)
     }
 
     /// Returns record for commitment, if any.
-    #[must_use]
-    pub fn get(&self, commitment: TradeCommitment) -> Option<TradeRecord> {
-        self.inner.get(commitment)
+    ///
+    /// # Errors
+    /// Fails closed if the persisted record cannot be loaded or validated.
+    pub fn get(&self, commitment: TradeCommitment) -> Result<Option<ReplayRecord>, SettlementReplayError> {
+        self.inner.get(commitment).map_err(map_replay_error)
     }
 }
 
@@ -320,8 +332,6 @@ impl<P: ReplayPersistence, A: SettlementAdapter> ReplayAwareSettlementAdapter<P,
         approval: &MatcherApproval,
         now: UnixSeconds,
     ) -> Result<SettlementDraft, SettlementError> {
-        let commitment = approval.commitment();
-
         // Ensure replay record exists — create from approval (only via CheckedTrade), if already exists try verify
         match self.replay.create_from_approval(approval) {
             Ok(_) => {
@@ -329,7 +339,7 @@ impl<P: ReplayPersistence, A: SettlementAdapter> ReplayAwareSettlementAdapter<P,
                 // MatcherApproval is only obtainable from a successful MatcherGate::evaluate,
                 // so full verification has already happened upstream.
                 self.replay
-                    .verify_commitment(commitment, now)
+                    .verify_commitment(approval, now)
                     .map_err(|e| SettlementError::ConstructionFailed {
                         reason: format!("replay verify failed: {e}"),
                     })?;
@@ -346,7 +356,7 @@ impl<P: ReplayPersistence, A: SettlementAdapter> ReplayAwareSettlementAdapter<P,
             },
             Err(_) => {
                 // Already exists — try verify to move to VERIFIED if needed
-                match self.replay.verify_commitment(commitment, now) {
+                match self.replay.verify_commitment(approval, now) {
                     Ok(_) => {},
                     Err(SettlementReplayError::AlreadyConsumed) => {
                         return Err(SettlementError::ConstructionFailed {
@@ -367,7 +377,7 @@ impl<P: ReplayPersistence, A: SettlementAdapter> ReplayAwareSettlementAdapter<P,
 
         // Acquire construction — compare-and-set, only one winner, expiry-gated
         self.replay
-            .acquire_settlement_construction(commitment, now)
+            .acquire_settlement_construction(approval, now)
             .map_err(|e| SettlementError::ConstructionFailed {
                 reason: format!("replay acquire_construction failed: {e:?} — only one winner, or expired, or illegal state"),
             })?;
@@ -443,7 +453,7 @@ impl UnconfiguredReplayCoordinator {
     pub fn create_from_approval(
         &self,
         _approval: &MatcherApproval,
-    ) -> Result<TradeRecord, SettlementReplayError> {
+    ) -> Result<ReplayRecord, SettlementReplayError> {
         Err(SettlementReplayError::Unconfigured)
     }
 }
@@ -457,9 +467,7 @@ mod tests {
     use zwa_credentials::{AuthorityKeyId, IssuerKeyId};
     use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use zwa_matcher::verifiers::{
-        EligibilityVerifierBackend, ProvenanceVerifierBackend, make_test_proof_json,
-    };
+    use crate::test_support::{subject_commitment, test_proof, TestGate, TestProofVerifier};
     use zwa_matcher::{GateInput, MatcherGate};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::lifecycle::{FailureReason, SettlementTxId as ProtocolTxId, TradeLifecycleState};
@@ -500,7 +508,7 @@ mod tests {
         }
     }
 
-    fn build_gate() -> (MatcherGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
+    fn build_gate() -> (TestGate<InMemoryPersistence>, OrchardReceiverBytes, zwa_credentials::IssuerRootEnvelope, zwa_credentials::CredentialRootEnvelope, SigningKey) {
         let sk_issuer = signing_key(1);
         let vk_issuer = sk_issuer.verifying_key();
         let issuer_id = IssuerKeyId::new(b"issuer-atlas").unwrap();
@@ -542,14 +550,14 @@ mod tests {
         approved_control.insert(recv_a, vk_control);
         let control_auth = zwa_matcher::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
 
-        let replay = zwa_matcher::replay::PersistentReplayStore::new(InMemoryPersistence::new(), 3);
+        let replay = zwa_matcher::replay::PersistentReplayStore::new(InMemoryPersistence::new(), 3).unwrap();
 
         let gate = MatcherGate::new(
             issuer_auth,
             cred_auth,
             control_auth,
-            ProvenanceVerifierBackend::default(),
-            EligibilityVerifierBackend::default(),
+            TestProofVerifier,
+            TestProofVerifier,
             replay,
         );
 
@@ -573,8 +581,8 @@ mod tests {
         .unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
 
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
 
         let input = GateInput {
             intent,
@@ -582,6 +590,7 @@ mod tests {
             issuer_envelope,
             credential_envelope: cred_envelope,
             approved_receiver: recv_a,
+            recipient_subject_commitment: subject_commitment(),
             control_challenge: challenge,
             control_response: response,
             provenance_proof: prov_proof,
@@ -618,19 +627,19 @@ mod tests {
 
         coordinator.create_from_approval(&approval).unwrap();
         let now = UnixSeconds::new(1_900_000_000);
-        coordinator.verify_commitment(commitment, now).unwrap();
+        coordinator.verify_commitment(&approval, now).unwrap();
 
         // After expiry → Expired terminal
         let after_expiry = UnixSeconds::new(2_000_000_001);
         let err = coordinator
-            .acquire_settlement_construction(commitment, after_expiry)
+            .acquire_settlement_construction(&approval, after_expiry)
             .unwrap_err();
         match err {
             SettlementReplayError::Replay(_) | SettlementReplayError::AlreadyExpired | SettlementReplayError::IllegalState { .. } => {},
             other => panic!("expected expiry error, got {other:?}"),
         }
         assert_eq!(
-            coordinator.state(commitment),
+            coordinator.state(commitment).unwrap(),
             Some(TradeLifecycleState::Expired)
         );
     }
@@ -644,16 +653,16 @@ mod tests {
 
         coordinator.create_from_approval(&approval).unwrap();
         let now = UnixSeconds::new(1_900_000_000);
-        coordinator.verify_commitment(commitment, now).unwrap();
+        coordinator.verify_commitment(&approval, now).unwrap();
         assert!(coordinator
-            .acquire_settlement_construction(commitment, now)
+            .acquire_settlement_construction(&approval, now)
             .is_ok());
         // Second acquire must fail — compare-and-set
         assert!(coordinator
-            .acquire_settlement_construction(commitment, now)
+            .acquire_settlement_construction(&approval, now)
             .is_err());
         assert_eq!(
-            coordinator.state(commitment),
+            coordinator.state(commitment).unwrap(),
             Some(TradeLifecycleState::SettlementConstructed)
         );
     }
@@ -667,9 +676,9 @@ mod tests {
         let now = UnixSeconds::new(1_900_000_000);
 
         coordinator.create_from_approval(&approval).unwrap();
-        coordinator.verify_commitment(commitment, now).unwrap();
+        coordinator.verify_commitment(&approval, now).unwrap();
         coordinator
-            .acquire_settlement_construction(commitment, now)
+            .acquire_settlement_construction(&approval, now)
             .unwrap();
         let txid = ProtocolTxId::new([1u8; 32]);
         coordinator.submit_settlement(commitment, txid, now).unwrap();
@@ -677,7 +686,7 @@ mod tests {
             .fail_settlement(commitment, FailureReason::SubmissionFailed)
             .unwrap();
         assert_eq!(
-            coordinator.state(commitment),
+            coordinator.state(commitment).unwrap(),
             Some(TradeLifecycleState::Failed)
         );
 
@@ -693,11 +702,11 @@ mod tests {
         assert_eq!(rec.state(), TradeLifecycleState::Created);
         // Must re-verify
         assert!(coordinator
-            .acquire_settlement_construction(commitment, now)
+            .acquire_settlement_construction(&approval, now)
             .is_err());
-        coordinator.verify_commitment(commitment, now).unwrap();
+        coordinator.verify_commitment(&approval, now).unwrap();
         assert_eq!(
-            coordinator.state(commitment),
+            coordinator.state(commitment).unwrap(),
             Some(TradeLifecycleState::Verified)
         );
     }
@@ -712,10 +721,10 @@ mod tests {
             let approval = valid_approval();
             coordinator.create_from_approval(&approval).unwrap();
             coordinator
-                .verify_commitment(commitment, UnixSeconds::new(1_900_000_000))
+                .verify_commitment(&approval, UnixSeconds::new(1_900_000_000))
                 .unwrap();
             assert_eq!(
-                coordinator.get(commitment).unwrap().state(),
+                coordinator.get(commitment).unwrap().unwrap().state(),
                 TradeLifecycleState::Verified
             );
         }
@@ -727,14 +736,14 @@ mod tests {
         let coordinator_tmp = SettlementReplayCoordinator::new(InMemoryPersistence::new(), 3);
         coordinator_tmp.create_from_approval(&approval).unwrap();
         coordinator_tmp
-            .verify_commitment(commitment, UnixSeconds::new(1_900_000_000))
+            .verify_commitment(&approval, UnixSeconds::new(1_900_000_000))
             .unwrap();
-        let rec = coordinator_tmp.get(commitment).unwrap();
-        persistence2.save(&rec).unwrap();
+        let rec = coordinator_tmp.get(commitment).unwrap().unwrap();
+        persistence2.compare_and_swap(None, &rec).unwrap();
 
         let coordinator2 = SettlementReplayCoordinator::new(persistence2, 3);
         assert_eq!(
-            coordinator2.state(commitment),
+            coordinator2.state(commitment).unwrap(),
             Some(TradeLifecycleState::Verified)
         );
     }
@@ -753,7 +762,7 @@ mod tests {
         let draft = replay_aware.construct(&approval).unwrap();
         assert_eq!(draft.commitment(), commitment);
         assert_eq!(
-            coordinator.state(commitment),
+            coordinator.state(commitment).unwrap(),
             Some(TradeLifecycleState::SettlementConstructed)
         );
 
@@ -794,10 +803,10 @@ mod tests {
         // Replay should be in SUBMITTED state with txid
         let commitment = approval.commitment();
         assert_eq!(
-            coordinator.state(commitment),
+            coordinator.state(commitment).unwrap(),
             Some(TradeLifecycleState::Submitted)
         );
-        let rec = coordinator.get(commitment).unwrap();
+        let rec = coordinator.get(commitment).unwrap().unwrap();
         assert!(rec.prior_txid().is_some());
     }
 
@@ -815,7 +824,7 @@ mod tests {
             commitment = approval.commitment();
             coordinator.create_from_approval(&approval).unwrap();
             coordinator
-                .verify_commitment(commitment, UnixSeconds::new(1_900_000_000))
+                .verify_commitment(&approval, UnixSeconds::new(1_900_000_000))
                 .unwrap();
             assert!(path.exists());
         }
@@ -824,7 +833,7 @@ mod tests {
             let persistence = JsonFilePersistence::new(&path).unwrap();
             let coordinator = SettlementReplayCoordinator::new(persistence, 3);
             assert_eq!(
-                coordinator.state(commitment),
+                coordinator.state(commitment).unwrap(),
                 Some(TradeLifecycleState::Verified),
                 "file persistence must recover VERIFIED state after restart"
             );
@@ -865,12 +874,14 @@ mod tests {
         let now = UnixSeconds::new(1_900_000_000);
 
         coordinator.create_from_approval(&approval).unwrap();
-        coordinator.verify_commitment(commitment, now).unwrap();
+        coordinator.verify_commitment(&approval, now).unwrap();
 
         let mut handles = Vec::new();
         for _ in 0..10 {
             let c = coordinator.clone();
-            let h = thread::spawn(move || c.acquire_settlement_construction(commitment, now).is_ok());
+            // Same commitment; `MatcherApproval` is not `Clone`, so each thread gets its own.
+            let appr = valid_approval();
+            let h = thread::spawn(move || c.acquire_settlement_construction(&appr, now).is_ok());
             handles.push(h);
         }
         let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -891,24 +902,23 @@ mod tests {
 
         coordinator.create_from_approval(&approval).unwrap();
         // Verify at expiry should succeed (now == expiry valid)
-        assert!(coordinator.verify_commitment(commitment, now_at_expiry).is_ok());
+        assert!(coordinator.verify_commitment(&approval, now_at_expiry).is_ok());
 
         // Acquire at expiry should succeed
         assert!(coordinator
-            .acquire_settlement_construction(commitment, now_at_expiry)
+            .acquire_settlement_construction(&approval, now_at_expiry)
             .is_ok());
 
         // New coordinator for after expiry test
         let persistence2 = InMemoryPersistence::new();
         let coordinator2 = SettlementReplayCoordinator::new(persistence2, 3);
         let approval2 = valid_approval();
-        let commitment2 = approval2.commitment();
         coordinator2.create_from_approval(&approval2).unwrap();
         coordinator2
-            .verify_commitment(commitment2, UnixSeconds::new(1_900_000_000))
+            .verify_commitment(&approval2, UnixSeconds::new(1_900_000_000))
             .unwrap();
         let err = coordinator2
-            .acquire_settlement_construction(commitment2, now_after_expiry)
+            .acquire_settlement_construction(&approval2, now_after_expiry)
             .unwrap_err();
         match err {
             SettlementReplayError::AlreadyExpired | SettlementReplayError::Replay(_) | SettlementReplayError::IllegalState { .. } => {},

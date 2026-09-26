@@ -51,8 +51,8 @@ use zwa_matcher::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBacke
 use zwa_matcher::{GateInput, MatcherGate};
 use zwa_protocol::bytes::{AssetBaseBytes, OrchardReceiverBytes};
 use zwa_protocol::numbers::{TradeExpiry, UnixSeconds};
-use zwa_protocol::proof::OpaqueProof;
-use zwa_protocol::values::{RecipientCommitment, TradeCommitment};
+use zwa_protocol::proof::{EligibilityVerifier, OpaqueProof, ProvenanceVerifier};
+use zwa_protocol::values::{RecipientCommitment, SubjectCommitment, TradeCommitment};
 use zwa_protocol::{TradeIntent, TradeNonce, TradeAmount, PolicyRoot, MatcherFee};
 
 use crate::execution::{ExecutionError, SettlementExecutor};
@@ -145,20 +145,22 @@ pub enum IntegrationError {
 ///
 /// Combines RFQ → MatcherGate → ProductionSettlementCoordinator → SettlementExecutor
 /// into one deterministic end-to-end flow with typed errors, fail-closed.
+///
+/// Generic over the matcher's proof verifiers; production uses the default
+/// real Groth16 backends. The parameters exist so tests can inject explicit fakes
+/// through the frozen verifier traits (M2 remediation F-01).
 #[derive(Debug)]
-pub struct EndToEndSettlementCoordinator<P: ReplayPersistence> {
-    gate: MatcherGate<P>,
+pub struct EndToEndSettlementCoordinator<
+    P: ReplayPersistence,
+    PV = ProvenanceVerifierBackend,
+    EV = EligibilityVerifierBackend,
+> {
+    gate: MatcherGate<P, PV, EV>,
     executor: SettlementExecutor<P>,
 }
 
 impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordinator<P> {
-    /// Builds coordinator with gate and executor.
-    #[must_use]
-    pub fn new(gate: MatcherGate<P>, executor: SettlementExecutor<P>) -> Self {
-        Self { gate, executor }
-    }
-
-    /// Builds with Ed25519 registry MVP — current production path.
+    /// Builds with Ed25519 registry MVP — current production path (real Groth16 verifiers).
     #[must_use]
     pub fn with_ed25519_registry(
         issuer_auth: IssuerRootAuthenticator,
@@ -170,17 +172,56 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
     where
         P: Clone,
     {
+        Self::with_ed25519_registry_and_verifiers(
+            issuer_auth,
+            credential_auth,
+            approved_control_keys,
+            replay_persistence,
+            max_retries,
+            ProvenanceVerifierBackend::default(),
+            EligibilityVerifierBackend::default(),
+        )
+    }
+}
+
+impl<P, PV, EV> EndToEndSettlementCoordinator<P, PV, EV>
+where
+    P: ReplayPersistence + std::fmt::Debug + 'static,
+    PV: ProvenanceVerifier,
+    EV: EligibilityVerifier,
+{
+    /// Builds coordinator with gate and executor.
+    #[must_use]
+    pub fn new(gate: MatcherGate<P, PV, EV>, executor: SettlementExecutor<P>) -> Self {
+        Self { gate, executor }
+    }
+
+    /// Builds with Ed25519 registry MVP and explicit proof verifiers.
+    #[must_use]
+    pub fn with_ed25519_registry_and_verifiers(
+        issuer_auth: IssuerRootAuthenticator,
+        credential_auth: CredentialRootAuthenticator,
+        approved_control_keys: BTreeMap<OrchardReceiverBytes, VerifyingKey>,
+        replay_persistence: P,
+        max_retries: u32,
+        provenance_verifier: PV,
+        eligibility_verifier: EV,
+    ) -> Self
+    where
+        P: Clone,
+    {
         let control_auth = zwa_matcher::control::RecipientControlAuthenticator::new(
             approved_control_keys.clone(),
             CONTROL_DOMAIN.to_vec(),
         );
-        let replay_store = zwa_matcher::replay::PersistentReplayStore::new(replay_persistence.clone(), max_retries);
+        // `lazy`: no startup scan; every replay operation still loads and fails closed.
+        let replay_store = zwa_matcher::replay::PersistentReplayStore::lazy(replay_persistence.clone(), max_retries);
         let gate = MatcherGate::new(
             issuer_auth,
             credential_auth,
             control_auth,
-            ProvenanceVerifierBackend::default(),
-            EligibilityVerifierBackend::default(),
+            provenance_verifier,
+            eligibility_verifier,
             replay_store,
         );
 
@@ -196,7 +237,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
 
     /// Returns gate reference.
     #[must_use]
-    pub fn gate(&self) -> &MatcherGate<P> {
+    pub fn gate(&self) -> &MatcherGate<P, PV, EV> {
         &self.gate
     }
 
@@ -211,7 +252,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
     /// This is the production-level V7 flow that enforces all guarantees from V1-V6 plus RFQ boundary.
     // Each argument is a distinct, independently authenticated input to the gate
     // (envelopes, control challenge/response, both proofs, both party keys); bundling
-    // them would only move the same 12 fields into a struct at every call site.
+    // them would only move the same 13 fields into a struct at every call site.
     #[allow(clippy::too_many_arguments)]
     pub fn process_rfq_and_settle(
         &self,
@@ -219,6 +260,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
         issuer_envelope: IssuerRootEnvelope,
         credential_envelope: CredentialRootEnvelope,
         approved_receiver: OrchardReceiverBytes,
+        recipient_subject_commitment: SubjectCommitment,
         control_challenge: RecipientControlChallenge,
         control_response: RecipientControlResponse,
         provenance_proof: OpaqueProof,
@@ -238,6 +280,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
             issuer_envelope,
             credential_envelope,
             approved_receiver,
+            recipient_subject_commitment,
             control_challenge,
             control_response,
             provenance_proof,
@@ -288,7 +331,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> EndToEndSettlementCoordin
 pub trait IntegrationTrait: Send + Sync + std::fmt::Debug {
     // Each argument is a distinct, independently authenticated input to the gate
     // (envelopes, control challenge/response, both proofs, both party keys); bundling
-    // them would only move the same 12 fields into a struct at every call site.
+    // them would only move the same 13 fields into a struct at every call site.
     #[allow(clippy::too_many_arguments)]
     fn process_rfq_and_settle(
         &self,
@@ -296,6 +339,7 @@ pub trait IntegrationTrait: Send + Sync + std::fmt::Debug {
         issuer_envelope: IssuerRootEnvelope,
         credential_envelope: CredentialRootEnvelope,
         approved_receiver: OrchardReceiverBytes,
+        recipient_subject_commitment: SubjectCommitment,
         control_challenge: RecipientControlChallenge,
         control_response: RecipientControlResponse,
         provenance_proof: OpaqueProof,
@@ -306,13 +350,19 @@ pub trait IntegrationTrait: Send + Sync + std::fmt::Debug {
     ) -> Result<(MatcherApproval, SettlementTxId), IntegrationError>;
 }
 
-impl<P: ReplayPersistence + std::fmt::Debug + 'static> IntegrationTrait for EndToEndSettlementCoordinator<P> {
+impl<P, PV, EV> IntegrationTrait for EndToEndSettlementCoordinator<P, PV, EV>
+where
+    P: ReplayPersistence + std::fmt::Debug + 'static,
+    PV: ProvenanceVerifier + Send + Sync + std::fmt::Debug,
+    EV: EligibilityVerifier + Send + Sync + std::fmt::Debug,
+{
     fn process_rfq_and_settle(
         &self,
         rfq: &RfqRequest,
         issuer_envelope: IssuerRootEnvelope,
         credential_envelope: CredentialRootEnvelope,
         approved_receiver: OrchardReceiverBytes,
+        recipient_subject_commitment: SubjectCommitment,
         control_challenge: RecipientControlChallenge,
         control_response: RecipientControlResponse,
         provenance_proof: OpaqueProof,
@@ -327,6 +377,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> IntegrationTrait for EndT
             issuer_envelope,
             credential_envelope,
             approved_receiver,
+            recipient_subject_commitment,
             control_challenge,
             control_response,
             provenance_proof,
@@ -356,6 +407,7 @@ impl IntegrationTrait for UnconfiguredIntegrationCoordinator {
         _issuer_envelope: IssuerRootEnvelope,
         _credential_envelope: CredentialRootEnvelope,
         _approved_receiver: OrchardReceiverBytes,
+        _recipient_subject_commitment: SubjectCommitment,
         _control_challenge: RecipientControlChallenge,
         _control_response: RecipientControlResponse,
         _provenance_proof: OpaqueProof,
@@ -377,7 +429,7 @@ mod tests {
     use zwa_matcher::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use zwa_matcher::replay::InMemoryPersistence;
     use zwa_matcher::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use zwa_matcher::verifiers::make_test_proof_json;
+    use crate::test_support::{subject_commitment, test_proof, TestProofVerifier};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
     use zwa_protocol::proof::OpaqueProof;
@@ -464,20 +516,22 @@ mod tests {
         approved_control.insert(recv_a, sk_control.verifying_key());
 
         let persistence = InMemoryPersistence::new();
-        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry(
+        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry_and_verifiers(
             issuer_auth,
             cred_auth,
             approved_control,
             persistence,
             3,
+            TestProofVerifier,
+            TestProofVerifier,
         );
 
         let now = UnixSeconds::new(1_900_000_100);
         let commitment = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
         let challenge = RecipientControlChallenge::new(recv_a, [7u8; 32], CONTROL_DOMAIN.to_vec(), UnixSeconds::new(1_900_000_000), UnixSeconds::new(2_100_000_000), commitment).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
 
         let sk_seller = signing_key(10);
         let sk_buyer = signing_key(11);
@@ -488,6 +542,7 @@ mod tests {
                 issuer_envelope,
                 cred_envelope,
                 recv_a,
+                subject_commitment(),
                 challenge,
                 response,
                 prov_proof,
@@ -511,12 +566,14 @@ mod tests {
         let mut approved_control = BTreeMap::new();
         approved_control.insert(recv_a, sk_control.verifying_key());
         let persistence = InMemoryPersistence::new();
-        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry(
+        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry_and_verifiers(
             issuer_auth,
             cred_auth,
             approved_control,
             persistence,
             3,
+            TestProofVerifier,
+            TestProofVerifier,
         );
 
         let now = UnixSeconds::new(1_900_000_100);
@@ -524,8 +581,8 @@ mod tests {
         let challenge = RecipientControlChallenge::new(recv_a, [7u8; 32], CONTROL_DOMAIN.to_vec(), UnixSeconds::new(1_900_000_000), UnixSeconds::new(2_100_000_000), commitment).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
         // Wrong provenance proof — different commitment, simulating fake RWA
-        let bad_prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, "7409670081847436957289371955571360481923983184454289247710022466448715682310")).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let bad_prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, "7409670081847436957289371955571360481923983184454289247710022466448715682310")).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
 
         let sk_seller = signing_key(10);
         let sk_buyer = signing_key(11);
@@ -536,6 +593,7 @@ mod tests {
                 issuer_envelope,
                 cred_envelope,
                 recv_a,
+                subject_commitment(),
                 challenge,
                 response,
                 bad_prov_proof,
@@ -561,21 +619,23 @@ mod tests {
         let mut approved_control = BTreeMap::new();
         approved_control.insert(recv_a, sk_control.verifying_key());
         let persistence = InMemoryPersistence::new();
-        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry(
+        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry_and_verifiers(
             issuer_auth,
             cred_auth,
             approved_control,
             persistence,
             3,
+            TestProofVerifier,
+            TestProofVerifier,
         );
 
         let now = UnixSeconds::new(1_900_000_100);
         let commitment = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
         let challenge = RecipientControlChallenge::new(recv_a, [7u8; 32], CONTROL_DOMAIN.to_vec(), UnixSeconds::new(1_900_000_000), UnixSeconds::new(2_100_000_000), commitment).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
         // Wrong eligibility proof — different commitment, simulating ineligible recipient
-        let bad_elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, "4141140993944283635059564795814979270169431233615041812756992202222578526061")).unwrap();
+        let bad_elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, "4141140993944283635059564795814979270169431233615041812756992202222578526061")).unwrap();
 
         let sk_seller = signing_key(10);
         let sk_buyer = signing_key(11);
@@ -586,6 +646,7 @@ mod tests {
                 issuer_envelope,
                 cred_envelope,
                 recv_a,
+                subject_commitment(),
                 challenge,
                 response,
                 prov_proof,
@@ -611,12 +672,14 @@ mod tests {
         let mut approved_control = BTreeMap::new();
         approved_control.insert(recv_a, sk_control.verifying_key());
         let persistence = InMemoryPersistence::new();
-        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry(
+        let coordinator = EndToEndSettlementCoordinator::with_ed25519_registry_and_verifiers(
             issuer_auth,
             cred_auth,
             approved_control,
             persistence,
             3,
+            TestProofVerifier,
+            TestProofVerifier,
         );
 
         let boxed: Box<dyn IntegrationTrait> = Box::new(coordinator);
@@ -625,8 +688,8 @@ mod tests {
         let commitment = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
         let challenge = RecipientControlChallenge::new(recv_a, [7u8; 32], CONTROL_DOMAIN.to_vec(), UnixSeconds::new(1_900_000_000), UnixSeconds::new(2_100_000_000), commitment).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
         let sk_seller = signing_key(10);
         let sk_buyer = signing_key(11);
 
@@ -636,6 +699,7 @@ mod tests {
                 issuer_envelope,
                 cred_envelope,
                 recv_a,
+                subject_commitment(),
                 challenge,
                 response,
                 prov_proof,
@@ -658,8 +722,8 @@ mod tests {
         let commitment = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
         let challenge = RecipientControlChallenge::new(recv_a, [7u8; 32], CONTROL_DOMAIN.to_vec(), UnixSeconds::new(1_900_000_000), UnixSeconds::new(2_100_000_000), commitment).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = OpaqueProof::new(&test_proof(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
+        let elig_proof = OpaqueProof::new(&test_proof(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
         let sk_seller = signing_key(10);
         let sk_buyer = signing_key(11);
 
@@ -670,6 +734,7 @@ mod tests {
                 issuer_envelope.clone(),
                 cred_envelope.clone(),
                 recv_a,
+                subject_commitment(),
                 challenge.clone(),
                 response.clone(),
                 prov_proof.clone(),
@@ -691,6 +756,7 @@ mod tests {
                 issuer_envelope,
                 cred_envelope,
                 recv_a,
+                subject_commitment(),
                 challenge,
                 response,
                 prov_proof,
