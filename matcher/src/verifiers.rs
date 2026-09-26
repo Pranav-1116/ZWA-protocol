@@ -16,8 +16,16 @@
 //! - VK identity is checked via SHA256 hash to prevent substitution (Sec 23 threat).
 //! - Both verifiers consume the exact same `TradeCommitmentV1` from `CheckedTrade`
 //!   via `MatcherProofGate` — type-level anti-splicing.
-//! - No mock verifier is reachable in default (non-test) build. Mock helpers are
-//!   `#[cfg(test)]` only.
+//! - **Fail closed (M2 remediation F-01).** Bytes that do not parse as a snarkjs
+//!   Groth16 proof are always `Invalid { ProofMalformed }`. There is no JSON
+//!   "public_inputs" fallback in any build: not in default builds, not under
+//!   `--all-features`, and not under `cfg(test)`. The former `test-helpers`
+//!   feature no longer enables anything (see `matcher/Cargo.toml`).
+//! - Tests that need a proof verifier which does not run Groth16 must inject an
+//!   explicit fake through the frozen [`ProvenanceVerifier`] /
+//!   [`EligibilityVerifier`] traits (see `MatcherProofGate` and
+//!   `crate::gate::MatcherGate`, which are generic over those traits and default
+//!   to the real backends). Such fakes live only in `#[cfg(test)]` modules.
 
 use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
@@ -353,7 +361,7 @@ impl Groth16Verifier {
 ///
 /// - Public inputs order frozen: `[authorizedIssuanceRoot, tradeCommitment]`
 /// - VK hash checked to prevent substitution
-/// - No mock reachable in default build — this is cryptographic verification
+/// - Cryptographic verification only; malformed bytes are always rejected in every build
 #[derive(Debug, Clone)]
 pub struct ProvenanceVerifierBackend {
     verifier: Groth16Verifier,
@@ -434,45 +442,13 @@ impl ProvenanceVerifier for ProvenanceVerifierBackend {
             Ok(false) => VerificationResult::Invalid {
                 reason: VerificationProblem::ProofRejected,
             },
-            Err(_) => {
-                // In test builds and downstream test crates, allow mock JSON format
-                #[cfg(any(test, feature = "test-helpers"))]
-                {
-                    if let Ok(mock) = try_parse_mock_proof(proof) {
-                        if mock[0] == authorized_issuance_root.to_string()
-                            && mock[1] == trade_commitment.to_string()
-                        {
-                            return VerificationResult::Valid;
-                        } else {
-                            return VerificationResult::Invalid {
-                                reason: VerificationProblem::PublicInputMismatch,
-                            };
-                        }
-                    }
-                }
-                VerificationResult::Invalid {
-                    reason: VerificationProblem::ProofMalformed,
-                }
-            }
+            // Fail closed: any parse/decode/curve error is a malformed proof.
+            // There is deliberately no alternative proof format.
+            Err(_) => VerificationResult::Invalid {
+                reason: VerificationProblem::ProofMalformed,
+            },
         }
     }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-fn try_parse_mock_proof(proof: &OpaqueProof) -> Result<[String; 2], ()> {
-    // Mock format: {"public_inputs": [root, commitment], ...}
-    let s = std::str::from_utf8(proof.as_bytes()).map_err(|_| ())?;
-    let v: serde_json::Value = serde_json::from_str(s).map_err(|_| ())?;
-    let arr = v
-        .get("public_inputs")
-        .and_then(|x| x.as_array())
-        .ok_or(())?;
-    if arr.len() != 2 {
-        return Err(());
-    }
-    let a = arr[0].as_str().ok_or(())?.to_string();
-    let b = arr[1].as_str().ok_or(())?.to_string();
-    Ok([a, b])
 }
 
 /// Real Groth16 eligibility verifier backend — Phase1B CRED_V2.
@@ -551,49 +527,75 @@ impl EligibilityVerifier for EligibilityVerifierBackend {
             Ok(false) => VerificationResult::Invalid {
                 reason: VerificationProblem::ProofRejected,
             },
-            Err(_) => {
-                #[cfg(any(test, feature = "test-helpers"))]
-                {
-                    if let Ok(mock) = try_parse_mock_proof(proof) {
-                        if mock[0] == active_credential_root.to_string()
-                            && mock[1] == trade_commitment.to_string()
-                        {
-                            return VerificationResult::Valid;
-                        } else {
-                            return VerificationResult::Invalid {
-                                reason: VerificationProblem::PublicInputMismatch,
-                            };
-                        }
-                    }
-                }
-                VerificationResult::Invalid {
-                    reason: VerificationProblem::ProofMalformed,
-                }
-            }
+            // Fail closed: any parse/decode/curve error is a malformed proof.
+            // There is deliberately no alternative proof format.
+            Err(_) => VerificationResult::Invalid {
+                reason: VerificationProblem::ProofMalformed,
+            },
         }
     }
 }
 
 // --- Same-commitment gate ---
 
-/// Matcher proof gate that enforces same-commitment invariant.
+/// Verifies both proofs of one trade against the authenticated roots and the
+/// **same** checked `TradeCommitmentV1`.
 ///
-/// Holds a `CheckedTrade` (Task A) and both authenticated roots (Task B) and
-/// verifies both proofs against the **exact same** `TradeCommitmentV1`.
-#[derive(Debug, Clone)]
-pub struct MatcherProofGate {
-    checked_trade: CheckedTrade,
-    provenance_verifier: ProvenanceVerifierBackend,
-    eligibility_verifier: EligibilityVerifierBackend,
+/// Order is fixed: provenance first, then eligibility. The eligibility verifier
+/// is not consulted when provenance fails. Any non-`Valid` result is returned
+/// as `Err` unchanged, so callers cannot mistake an `Invalid` result for success.
+///
+/// Generic over the frozen verifier traits so tests can inject explicit fakes;
+/// production code uses [`ProvenanceVerifierBackend`] /
+/// [`EligibilityVerifierBackend`].
+///
+/// # Errors
+///
+/// Returns the first non-`Valid` [`VerificationResult`].
+pub fn verify_trade_proofs<PV, EV>(
+    provenance_verifier: &PV,
+    eligibility_verifier: &EV,
+    checked_trade: &CheckedTrade,
+    issuer_root: &AuthenticatedIssuerRoot,
+    credential_root: &AuthenticatedCredentialRoot,
+    provenance_proof: &OpaqueProof,
+    eligibility_proof: &OpaqueProof,
+) -> Result<(), VerificationResult>
+where
+    PV: ProvenanceVerifier + ?Sized,
+    EV: EligibilityVerifier + ?Sized,
+{
+    let commitment = checked_trade.commitment();
+
+    let prov_result = provenance_verifier.verify(issuer_root.root(), commitment, provenance_proof);
+    if !prov_result.is_valid() {
+        return Err(prov_result);
+    }
+
+    let elig_result =
+        eligibility_verifier.verify(credential_root.root(), commitment, eligibility_proof);
+    if !elig_result.is_valid() {
+        return Err(elig_result);
+    }
+
+    Ok(())
 }
 
-impl MatcherProofGate {
+/// Matcher proof gate that enforces same-commitment invariant.
+///
+/// Holds a `CheckedTrade` (Task A) and both verifiers, and verifies both proofs
+/// against the **exact same** `TradeCommitmentV1` and the authenticated roots
+/// (Task B). Type parameters default to the real Groth16 backends.
+#[derive(Debug, Clone)]
+pub struct MatcherProofGate<PV = ProvenanceVerifierBackend, EV = EligibilityVerifierBackend> {
+    checked_trade: CheckedTrade,
+    provenance_verifier: PV,
+    eligibility_verifier: EV,
+}
+
+impl<PV: ProvenanceVerifier, EV: EligibilityVerifier> MatcherProofGate<PV, EV> {
     #[must_use]
-    pub fn new(
-        checked_trade: CheckedTrade,
-        provenance_verifier: ProvenanceVerifierBackend,
-        eligibility_verifier: EligibilityVerifierBackend,
-    ) -> Self {
+    pub fn new(checked_trade: CheckedTrade, provenance_verifier: PV, eligibility_verifier: EV) -> Self {
         Self {
             checked_trade,
             provenance_verifier,
@@ -607,6 +609,10 @@ impl MatcherProofGate {
     }
 
     /// Verifies both proofs against authenticated roots and same commitment.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first non-`Valid` [`VerificationResult`].
     pub fn verify_both(
         &self,
         issuer_root: &AuthenticatedIssuerRoot,
@@ -614,53 +620,16 @@ impl MatcherProofGate {
         provenance_proof: &OpaqueProof,
         eligibility_proof: &OpaqueProof,
     ) -> Result<(), VerificationResult> {
-        let commitment = self.checked_trade.commitment();
-
-        // Ensure roots match the ones that were authenticated — prevents swapped inputs
-        // (The verifiers themselves check public inputs, but we also ensure the gate uses the authenticated roots)
-
-        let prov_result = self.provenance_verifier.verify(
-            issuer_root.root(),
-            commitment,
+        verify_trade_proofs(
+            &self.provenance_verifier,
+            &self.eligibility_verifier,
+            &self.checked_trade,
+            issuer_root,
+            credential_root,
             provenance_proof,
-        );
-
-        if !prov_result.is_valid() {
-            return Err(prov_result);
-        }
-
-        let elig_result = self.eligibility_verifier.verify(
-            credential_root.root(),
-            commitment,
             eligibility_proof,
-        );
-
-        if !elig_result.is_valid() {
-            return Err(elig_result);
-        }
-
-        Ok(())
+        )
     }
-}
-
-// --- Test helpers ---
-
-/// Helper to create a test proof JSON with given public inputs — mock format
-/// for unit tests that don't need real Groth16. Real proofs are in fixtures.
-///
-/// Only compiled for matcher's own tests or with the `test-helpers` feature
-/// (enable it from a downstream crate's `[dev-dependencies]`). Never present in
-/// production builds, so the mock-proof path cannot be reached there.
-#[cfg(any(test, feature = "test-helpers"))]
-#[must_use]
-pub fn make_test_proof_json(root_decimal: &str, commitment_decimal: &str) -> Vec<u8> {
-    let obj = serde_json::json!({
-        "public_inputs": [root_decimal, commitment_decimal],
-        "proof": { "a": "dummy", "b": "dummy", "c": "dummy" },
-        "protocol": "groth16",
-        "curve": "bn128"
-    });
-    serde_json::to_vec(&obj).expect("serializing a static json! value cannot fail")
 }
 
 /// Loads real provenance proof from fixture `tests/fixtures/groth16/provenance-proof.json`
@@ -689,7 +658,6 @@ mod tests {
         "7239536478138432754387625126231950010993505962177483323536139232738771167323";
     const TRADE_COMMITMENT: &str =
         "10187400613857124614980227259922066295752635539032972479692659299555113110306";
-    #[allow(dead_code)]
     const OTHER_COMMITMENT: &str =
         "7409670081847436957289371955571360481923983184454289247710022466448715682310";
 
@@ -962,6 +930,153 @@ mod tests {
             .verify_both(&auth_issuer, &auth_cred, &prov_proof, &elig_proof)
             .unwrap_err();
         assert!(!err.is_valid());
+    }
+
+    // --- F-01 regression: fail closed, no fake-JSON fallback in any build ---
+
+    /// The exact shape the removed `make_test_proof_json` helper produced. The
+    /// old backends accepted it whenever its `public_inputs` equalled the
+    /// expected `[root, commitment]`. It must now be rejected as malformed.
+    fn legacy_fake_proof_json(root: &str, commitment: &str) -> OpaqueProof {
+        let obj = serde_json::json!({
+            "public_inputs": [root, commitment],
+            "proof": { "a": "dummy", "b": "dummy", "c": "dummy" },
+            "protocol": "groth16",
+            "curve": "bn128"
+        });
+        OpaqueProof::new(&serde_json::to_vec(&obj).unwrap()).unwrap()
+    }
+
+    fn malformed() -> VerificationResult {
+        VerificationResult::Invalid {
+            reason: VerificationProblem::ProofMalformed,
+        }
+    }
+
+    #[test]
+    fn f01_legacy_fake_json_rejected_by_provenance_even_with_matching_inputs() {
+        let verifier = ProvenanceVerifierBackend::from_fixture().unwrap();
+        let root = AuthorizedIssuanceRoot::from_decimal_str(REAL_PROVENANCE_ROOT).unwrap();
+        let commitment = TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
+        let fake = legacy_fake_proof_json(REAL_PROVENANCE_ROOT, REAL_PROVENANCE_COMMITMENT);
+        assert_eq!(verifier.verify(root, commitment, &fake), malformed());
+    }
+
+    #[test]
+    fn f01_legacy_fake_json_rejected_by_eligibility_even_with_matching_inputs() {
+        let verifier = EligibilityVerifierBackend::from_fixture().unwrap();
+        let root = ActiveCredentialRoot::from_decimal_str(REAL_ELIGIBILITY_ROOT).unwrap();
+        let commitment = TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
+        let fake = legacy_fake_proof_json(REAL_ELIGIBILITY_ROOT, REAL_ELIGIBILITY_COMMITMENT);
+        assert_eq!(verifier.verify(root, commitment, &fake), malformed());
+    }
+
+    #[test]
+    fn f01_legacy_fake_json_rejected_for_wrong_commitment_and_wrong_root() {
+        let prov = ProvenanceVerifierBackend::from_fixture().unwrap();
+        let elig = EligibilityVerifierBackend::from_fixture().unwrap();
+        let root_p = AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap();
+        let root_e = ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap();
+        let c = TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
+        // Fake JSON naming a different commitment / root: still malformed, never
+        // PublicInputMismatch (which would reveal a JSON parse path exists).
+        let wrong_c = legacy_fake_proof_json(ISSUANCE_ROOT, OTHER_COMMITMENT);
+        let wrong_r = legacy_fake_proof_json(REAL_PROVENANCE_ROOT, TRADE_COMMITMENT);
+        assert_eq!(prov.verify(root_p, c, &wrong_c), malformed());
+        assert_eq!(prov.verify(root_p, c, &wrong_r), malformed());
+        let wrong_c = legacy_fake_proof_json(CREDENTIAL_ROOT, OTHER_COMMITMENT);
+        let wrong_r = legacy_fake_proof_json(REAL_ELIGIBILITY_ROOT, TRADE_COMMITMENT);
+        assert_eq!(elig.verify(root_e, c, &wrong_c), malformed());
+        assert_eq!(elig.verify(root_e, c, &wrong_r), malformed());
+    }
+
+    #[test]
+    fn f01_real_proof_wrong_commitment_and_wrong_root_rejected_not_malformed() {
+        // A well-formed real proof under wrong public inputs is a pairing
+        // failure (ProofRejected), proving the cryptographic path ran.
+        let prov = ProvenanceVerifierBackend::from_fixture().unwrap();
+        let elig = EligibilityVerifierBackend::from_fixture().unwrap();
+        let rejected = VerificationResult::Invalid {
+            reason: VerificationProblem::ProofRejected,
+        };
+        let p_root = AuthorizedIssuanceRoot::from_decimal_str(REAL_PROVENANCE_ROOT).unwrap();
+        let p_c = TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
+        let e_root = ActiveCredentialRoot::from_decimal_str(REAL_ELIGIBILITY_ROOT).unwrap();
+        let e_c = TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
+        let p_proof = load_real_provenance_proof();
+        let e_proof = load_real_eligibility_proof();
+        assert_eq!(prov.verify(p_root, e_c, &p_proof), rejected);
+        assert_eq!(
+            prov.verify(AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(), p_c, &p_proof),
+            rejected
+        );
+        assert_eq!(elig.verify(e_root, p_c, &e_proof), rejected);
+        assert_eq!(
+            elig.verify(ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap(), e_c, &e_proof),
+            rejected
+        );
+    }
+
+    #[test]
+    fn f01_malformed_groth16_bytes_always_reject() {
+        let prov = ProvenanceVerifierBackend::from_fixture().unwrap();
+        let elig = EligibilityVerifierBackend::from_fixture().unwrap();
+        let p_root = AuthorizedIssuanceRoot::from_decimal_str(REAL_PROVENANCE_ROOT).unwrap();
+        let p_c = TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
+        let e_root = ActiveCredentialRoot::from_decimal_str(REAL_ELIGIBILITY_ROOT).unwrap();
+        let e_c = TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
+
+        let real = include_str!("../../tests/fixtures/groth16/provenance-proof.json");
+        let mut off_curve: serde_json::Value = serde_json::from_str(real).unwrap();
+        off_curve["pi_c"][1] = serde_json::Value::String("7".to_string());
+        let mut not_a_number: serde_json::Value = serde_json::from_str(real).unwrap();
+        not_a_number["pi_a"][0] = serde_json::Value::String("0xzz".to_string());
+        let mut missing_field: serde_json::Value = serde_json::from_str(real).unwrap();
+        missing_field.as_object_mut().unwrap().remove("pi_b");
+
+        let cases: Vec<Vec<u8>> = vec![
+            vec![0xff, 0xfe, 0x00],                         // not UTF-8
+            b"{".to_vec(),                                  // truncated JSON
+            b"null".to_vec(),                               // wrong JSON type
+            b"{}".to_vec(),                                 // empty object
+            real.as_bytes()[..real.len() / 2].to_vec(),     // truncated real proof
+            serde_json::to_vec(&off_curve).unwrap(),        // point not on curve
+            serde_json::to_vec(&not_a_number).unwrap(),     // non-decimal coordinate
+            serde_json::to_vec(&missing_field).unwrap(),    // missing pi_b
+        ];
+        for (i, bytes) in cases.iter().enumerate() {
+            let proof = OpaqueProof::new(bytes).unwrap();
+            assert!(!prov.verify(p_root, p_c, &proof).is_valid(), "provenance case {i}");
+            assert!(!elig.verify(e_root, e_c, &proof).is_valid(), "eligibility case {i}");
+        }
+        // Non-parsable shapes are specifically ProofMalformed.
+        for bytes in &cases[..5] {
+            let proof = OpaqueProof::new(bytes).unwrap();
+            assert_eq!(prov.verify(p_root, p_c, &proof), malformed());
+            assert_eq!(elig.verify(e_root, e_c, &proof), malformed());
+        }
+    }
+
+    #[test]
+    fn f01_no_bypass_symbols_exist_in_matcher_sources() {
+        // Guard against re-introducing the feature-gated fallback. Scans the
+        // non-test portion of every matcher source file.
+        let sources = [
+            ("verifiers.rs", include_str!("verifiers.rs")),
+            ("gate.rs", include_str!("gate.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+        ];
+        let banned = [
+            ["try_parse_", "mock_proof"].concat(),
+            ["make_test_", "proof_json"].concat(),
+            ["feature = \"", "test-helpers\""].concat(),
+        ];
+        for (name, src) in sources {
+            let prod = src.find("\nmod tests {").map_or(src, |i| &src[..i]);
+            for b in &banned {
+                assert!(!prod.contains(b.as_str()), "{name} must not contain `{b}`");
+            }
+        }
     }
 
     #[test]

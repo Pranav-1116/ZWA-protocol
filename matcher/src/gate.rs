@@ -57,7 +57,7 @@
 use zwa_credentials::{CredentialRootEnvelope, IssuerRootEnvelope};
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;
-use zwa_protocol::proof::{OpaqueProof, VerificationResult};
+use zwa_protocol::proof::{EligibilityVerifier, OpaqueProof, ProvenanceVerifier, VerificationResult};
 use zwa_protocol::{TradeCommitment, TradeIntent};
 
 use crate::checked::CheckedTrade;
@@ -67,7 +67,7 @@ use crate::roots::{
     check_combined_root_expiry, AuthenticatedCredentialRoot, AuthenticatedIssuerRoot,
     CredentialRootAuthenticator, IssuerRootAuthenticator, RootAuthError,
 };
-use crate::verifiers::{EligibilityVerifierBackend, MatcherProofGate, ProvenanceVerifierBackend};
+use crate::verifiers::{verify_trade_proofs, EligibilityVerifierBackend, ProvenanceVerifierBackend};
 
 /// Typed rejection reasons for deterministic allow/block decision.
 ///
@@ -217,33 +217,45 @@ pub struct GateInput {
 ///
 /// Holds all authenticators, verifiers, and persistent replay store.
 ///
-/// # Thread safety
+/// # Proof verifiers
 ///
-/// `PersistentReplayStore` is thread-safe via `Mutex<ReplayStore>`.
-pub struct MatcherGate<P: ReplayPersistence> {
+/// `PV` / `EV` default to the real Groth16 backends. They are type parameters
+/// only so that tests can inject explicit fakes through the frozen
+/// [`ProvenanceVerifier`] / [`EligibilityVerifier`] traits; no cargo feature
+/// switches verification behaviour (M2 remediation F-01).
+pub struct MatcherGate<
+    P: ReplayPersistence,
+    PV = ProvenanceVerifierBackend,
+    EV = EligibilityVerifierBackend,
+> {
     issuer_authenticator: IssuerRootAuthenticator,
     credential_authenticator: CredentialRootAuthenticator,
     control_authenticator: RecipientControlAuthenticator,
-    provenance_verifier: ProvenanceVerifierBackend,
-    eligibility_verifier: EligibilityVerifierBackend,
+    provenance_verifier: PV,
+    eligibility_verifier: EV,
     replay_store: PersistentReplayStore<P>,
 }
 
-impl<P: ReplayPersistence> std::fmt::Debug for MatcherGate<P> {
+impl<P: ReplayPersistence, PV, EV> std::fmt::Debug for MatcherGate<P, PV, EV> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MatcherGate").finish_non_exhaustive()
     }
 }
 
-impl<P: ReplayPersistence> MatcherGate<P> {
+impl<P, PV, EV> MatcherGate<P, PV, EV>
+where
+    P: ReplayPersistence,
+    PV: ProvenanceVerifier,
+    EV: EligibilityVerifier,
+{
     /// Builds gate with all components.
     #[must_use]
     pub fn new(
         issuer_authenticator: IssuerRootAuthenticator,
         credential_authenticator: CredentialRootAuthenticator,
         control_authenticator: RecipientControlAuthenticator,
-        provenance_verifier: ProvenanceVerifierBackend,
-        eligibility_verifier: EligibilityVerifierBackend,
+        provenance_verifier: PV,
+        eligibility_verifier: EV,
         replay_store: PersistentReplayStore<P>,
     ) -> Self {
         Self {
@@ -427,20 +439,16 @@ impl<P: ReplayPersistence> MatcherGate<P> {
         }
 
         // Step 7 & 8: Proof verification against same checked commitment
-        let proof_gate = MatcherProofGate::new(
-            checked_trade,
-            self.provenance_verifier.clone(),
-            self.eligibility_verifier.clone(),
-        );
-
-        proof_gate
-            .verify_both(
-                &auth_issuer,
-                &auth_cred,
-                &input.provenance_proof,
-                &input.eligibility_proof,
-            )
-            .map_err(GateRejection::ProofInvalid)?;
+        verify_trade_proofs(
+            &self.provenance_verifier,
+            &self.eligibility_verifier,
+            &checked_trade,
+            &auth_issuer,
+            &auth_cred,
+            &input.provenance_proof,
+            &input.eligibility_proof,
+        )
+        .map_err(GateRejection::ProofInvalid)?;
 
         // Step 9: Acquire settlement construction — compare-and-set lock, expiry-gated
         self.replay_store
@@ -464,13 +472,15 @@ mod tests {
     use crate::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use crate::replay::{InMemoryPersistence, PersistentReplayStore};
     use crate::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use crate::verifiers::{EligibilityVerifierBackend, ProvenanceVerifierBackend, make_test_proof_json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use zwa_protocol::proof::VerificationProblem;
     use ed25519_dalek::{Signer, SigningKey};
     use std::collections::BTreeMap;
     use zwa_credentials::{AuthorityKeyId, IssuerKeyId};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
-    use zwa_protocol::proof::{OpaqueProof, ProvenanceVerifier, EligibilityVerifier};
+    use zwa_protocol::proof::{EligibilityVerifier, OpaqueProof, ProvenanceVerifier};
     use zwa_protocol::{
         AssetBaseBytes, AuthorizedIssuanceRoot, ActiveCredentialRoot, MatcherFee, OpaqueSignature,
         PolicyRoot, RecipientCommitment, TradeAmount, TradeNonce, ZatoshiAmount, TradeIntent,
@@ -486,6 +496,64 @@ mod tests {
         "781671f8a41294c866d8161f3bf5f84a8fd2c328f91a2d085a66036acd59439731c36c4f1b99b4d64be233";
     const RECEIVER_B_HEX: &str =
         "ba5a9b6828e14d720cc41e998917f5996635d1a7fa84448cb118f7b6f65068d380099e5cd54d98dd3917bb";
+
+
+    // --- Explicit test-only proof verifier (F-01) ---
+    //
+    // Injected through the frozen verifier traits. Compiled only under
+    // `cfg(test)` inside this module; no cargo feature can reach it. A "proof"
+    // is valid only if its bytes were minted by `fake_proof` for exactly the
+    // `(label, root, commitment)` the gate asks about, so wrong-root,
+    // wrong-commitment and cross-verifier splicing all still fail. Real
+    // Groth16 behaviour is covered by `verifiers::tests` and the
+    // real-eligibility gate tests below.
+
+    const PROV_LABEL: &str = "fake-provenance";
+    const ELIG_LABEL: &str = "fake-eligibility";
+
+    #[derive(Debug, Clone)]
+    struct FakeVerifier {
+        label: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FakeVerifier {
+        fn new(label: &'static str) -> Self {
+            Self { label, calls: Arc::new(AtomicUsize::new(0)) }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn check(&self, root: String, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let expected = format!("{}|{}|{}", self.label, root, commitment);
+            if proof.as_bytes() == expected.as_bytes() {
+                VerificationResult::Valid
+            } else {
+                VerificationResult::Invalid { reason: VerificationProblem::ProofRejected }
+            }
+        }
+    }
+
+    impl ProvenanceVerifier for FakeVerifier {
+        fn verify(&self, root: AuthorizedIssuanceRoot, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+            self.check(root.to_string(), commitment, proof)
+        }
+    }
+
+    impl EligibilityVerifier for FakeVerifier {
+        fn verify(&self, root: ActiveCredentialRoot, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+            self.check(root.to_string(), commitment, proof)
+        }
+    }
+
+    fn fake_proof(label: &str, root: &str, commitment: &str) -> OpaqueProof {
+        OpaqueProof::new(format!("{label}|{root}|{commitment}").as_bytes()).unwrap()
+    }
+
+    type TestGate = MatcherGate<InMemoryPersistence, FakeVerifier, FakeVerifier>;
 
     fn signing_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
@@ -508,7 +576,7 @@ mod tests {
     }
 
     fn build_gate() -> (
-        MatcherGate<InMemoryPersistence>,
+        TestGate,
         OrchardReceiverBytes,
         IssuerRootEnvelope,
         CredentialRootEnvelope,
@@ -564,8 +632,8 @@ mod tests {
             issuer_auth,
             cred_auth,
             control_auth,
-            ProvenanceVerifierBackend::default(),
-            EligibilityVerifierBackend::default(),
+            FakeVerifier::new(PROV_LABEL),
+            FakeVerifier::new(ELIG_LABEL),
             replay,
         );
 
@@ -574,7 +642,7 @@ mod tests {
 
     fn valid_gate_input() -> (
         GateInput,
-        MatcherGate<InMemoryPersistence>,
+        TestGate,
     ) {
         let (gate, recv_a, issuer_envelope, cred_envelope, sk_control) = build_gate();
         let intent = golden_intent();
@@ -592,8 +660,8 @@ mod tests {
         .unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
 
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_COMMITMENT);
+        let elig_proof = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, TRADE_COMMITMENT);
 
         let input = GateInput {
             intent,
@@ -761,7 +829,7 @@ mod tests {
         // Valid asset, wrong investor class → eligibility proof has wrong public inputs
         let (mut input, gate) = valid_gate_input();
         // Make eligibility proof for different commitment (simulating wrong class proof)
-        let bad_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, "7409670081847436957289371955571360481923983184454289247710022466448715682310")).unwrap();
+        let bad_proof = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, "7409670081847436957289371955571360481923983184454289247710022466448715682310");
         input.eligibility_proof = bad_proof;
         let err = gate.evaluate(input).unwrap_err();
         match err {
@@ -849,7 +917,7 @@ mod tests {
     fn gate_blocks_proof_splicing_from_different_trades() {
         // Proof A from trade A, proof B from trade B with different commitment → must fail
         let (mut input, gate) = valid_gate_input();
-        let spliced_elig = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, "4141140993944283635059564795814979270169431233615041812756992202222578526061")).unwrap();
+        let spliced_elig = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, "4141140993944283635059564795814979270169431233615041812756992202222578526061");
         input.eligibility_proof = spliced_elig;
         let err = gate.evaluate(input).unwrap_err();
         match err {
@@ -885,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn a8_integration_real_signatures_real_control_persistent_replay_mock_proofs() {
+    fn a8_integration_real_signatures_real_control_persistent_replay_injected_fake_proofs() {
         use crate::replay::{JsonFilePersistence, PersistentReplayStore};
         use std::fs;
         let dir = std::env::temp_dir();
@@ -940,8 +1008,8 @@ mod tests {
             issuer_auth,
             cred_auth,
             control_auth,
-            ProvenanceVerifierBackend::default(),
-            EligibilityVerifierBackend::default(),
+            FakeVerifier::new(PROV_LABEL),
+            FakeVerifier::new(ELIG_LABEL),
             replay,
         );
         let now = UnixSeconds::new(1_900_000_100);
@@ -954,8 +1022,8 @@ mod tests {
             commitment,
         ).unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
-        let prov_proof = OpaqueProof::new(&make_test_proof_json(ISSUANCE_ROOT, TRADE_COMMITMENT)).unwrap();
-        let elig_proof = OpaqueProof::new(&make_test_proof_json(CREDENTIAL_ROOT, TRADE_COMMITMENT)).unwrap();
+        let prov_proof = fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_COMMITMENT);
+        let elig_proof = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, TRADE_COMMITMENT);
         let input = GateInput {
             intent: golden_intent(),
             commitment,
