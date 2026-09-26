@@ -23,29 +23,21 @@
 //!    Prevents: Stale/superseded root replay, not-yet-valid root, trade expiry beyond root expiry, revocation latency abuse. Combined `trade_expiry ≤ min(issuer_expiry, credential_expiry)` ensures trade valid through earliest root.
 //!    Output: `AuthenticatedIssuerRoot`, `AuthenticatedCredentialRoot` private envelope, cannot be fabricated.
 //!
-//! 5. **Verify live wallet control of authority-approved receiver (Task C + A5)**
-//!    Why: Phase1B binds authority-approved receiver into credential leaf: `credential(A)+trade(A) PASS, credential(A)+trade(B) FAIL`. That prevents lending at circuit level, but not pre-proof secret lending. Live control proves trader currently controls approved receiver. Domain `ZWA-RECIPIENT-CTRL-V1`, nonce\[32\] fresh, issued_at/expiry, receiver 43B, trade_commitment 32B all in canonical bytes.
-//!    Prevents: Credential secret lent to another wallet, approved A without wallet control, challenge replay across domains/times/receivers/trades, expired challenge reuse.
-//!    Output: `VerifiedRecipientControl` with receiver_commitment `H(RECEIVR1, limbs)` canonical.
+//! 5. **Bind the approved receiver to the trade, then verify live wallet control (F-02, Task C + A5)**
+//!    Why: the raw `approved_receiver` is caller-supplied. The gate recomputes `H(RCPBIND1, subject, H(RECEIVR1, approved_receiver))` with frozen `zwa-commitments` and requires it to equal `intent.recipient_commitment`. Phase1B eligibility (step 7) binds that same recipient commitment to the credential leaf's receiver, and control is verified for exactly `approved_receiver`. So trade, credential and controlled wallet name one receiver.
+//!    Prevents: proof for receiver A + control of receiver B, credential secret lent to another wallet, challenge replay across domains/times/receivers/trades, expired challenge reuse.
+//!    Output: `VerifiedRecipientControl` whose receiver commitment equals the bound receiver commitment.
 //!
-//! 6. **Verify trade expiry + replay state permit verification (Task E + A6)**
-//!    Why: Frozen predicate `now > expiry` (now == expiry valid), expiry re-checked at verify, acquire_construction, submit, retry. `confirm`/`consume` allowed after expiry if submission was valid. `FAILED → CREATED → full re-verification` (085efe0 fix). `CONSUMED`/`EXPIRED` terminal.
-//!    Prevents: Replay after settlement, retry using stale verification, construction/submission after expiry, double construction (compare-and-set, only one winner), retry budget exhaustion.
-//!    Output: Persistent `CREATED → VERIFIED` via `PersistentReplayStore` with atomic file persistence, survives restart.
+//! 6. **Verify provenance proof vs authorizedIssuanceRoot + checked commitment (Task D + A4)**
+//!    Public inputs order frozen `[root, commitment]`. Malformed proofs always reject (F-01).
 //!
-//! 7. **Verify provenance proof vs authorizedIssuanceRoot + checked commitment (Task D + A4)**
-//!    Why: Proves offered AssetBase belongs to issuer-authorized issuance set (Merkle depth 3). Public inputs order frozen `[root, commitment]`.
-//!    Prevents: Fake RWA, wrong issuance root, amount/fee/recipient substitution via commitment binding, proof malformed/rejected.
-//!    Gate: Uses exact `checked_trade.commitment()` from Task A — no re-derivation.
+//! 7. **Verify eligibility Phase1B proof vs activeCredentialRoot + same commitment (Task D + A4)**
+//!    Same checked commitment as step 6 (anti-splicing). VK identity pinned by hash.
 //!
-//! 8. **Verify eligibility Phase1B proof vs activeCredentialRoot + same commitment (Task D + A4)**
-//!    Why: Private credential + policy + approved receiver binding to same trade. Range checks investor class 8b, jurisdiction 16b, expiry 64b, nonce 64b. Single receiverHasher reused twice per security comment.
-//!    Prevents: Wrong investor class/jurisdiction, borrowed credential, credential A + trade B, proof splicing (same commitment invariant via `MatcherProofGate`), VK substitution via hash check.
-//!    Output: Both proofs verified against **same** `TradeCommitmentV1`.
+//! 8. **Only now write replay state (F-07): create if absent → `VERIFIED` → `SETTLEMENT_CONSTRUCTED`**
+//!    Each write is a compare-and-swap on the authoritative store (F-05/F-06). A failed check in steps 1–7 leaves replay state untouched (no record, or the prior `CREATED`/`VERIFIED`). Right after step 2, a read-only precheck rejects `FAILED` (explicit `retry_after_failure` with txid acknowledgement required, then full re-verification), `CONSUMED`/`EXPIRED` (terminal) and active settlement states (replay). An expired trade (`now > expiry`; `now == expiry` is valid) moves an existing `CREATED`/`VERIFIED` record to `EXPIRED` and never creates one.
 //!
-//! 9. **Acquire settlement construction only after 1-8 succeed (Task E compare-and-set)**
-//!    Why: Expensive atomic ZSA settlement (pinned experimental stack) must only happen after all cheap gates pass. Acquire is atomic, only one worker wins.
-//!    Prevents: Two workers constructing settlement for same commitment, construction after expiry, construction without verification.
+//! 9. *(merged into 8)* The construction lock is the last CAS; only one concurrent caller wins.
 //!
 //! 10. **Return VerifiedTrade / MatcherApproval to settlement adapter (Phase 3 later)**
 //!     Why: Opaque, non-serializable approval that can only be obtained via `evaluate()`. Holds checked trade, authenticated roots, verified control.
@@ -98,6 +90,13 @@ pub enum GateRejection {
 
     #[error("trade already expired")]
     AlreadyExpired,
+
+    /// The trade is `FAILED`. The gate never retries on its own: the operator
+    /// must call `PersistentReplayStore::retry_after_failure` with the exact
+    /// prior txid acknowledgement, after which the trade is `CREATED` and must
+    /// pass the full gate again.
+    #[error("trade failed; explicit retry_after_failure (with txid acknowledgement) required")]
+    RetryRequired,
 
     #[error("trade in illegal state for verification: {state:?}")]
     IllegalState { state: String },
@@ -294,25 +293,40 @@ where
         &self.replay_store
     }
 
-    /// Evaluates trade through 10-step gate.
+    /// Evaluates a trade through the full gate.
     ///
-    /// Returns `VerifiedTrade` on ALLOW, `GateRejection` on BLOCK.
+    /// Returns an opaque [`VerifiedTrade`] on ALLOW, a typed [`GateRejection`]
+    /// on BLOCK. Order (M2 remediation F-07) — nothing is written to replay
+    /// state until every check has passed:
     ///
-    /// Steps:
-    /// 1. Parse (already typed)
-    /// 2. CheckedTrade::new — commitment correspondence (Task A)
-    /// 3. Auth issuer + credential roots (Task B)
-    /// 4. Current version, freshness, trade_expiry ≤ root_expiry, combined min (Task B)
-    /// 5. Live wallet control of approved receiver (Task C)
-    /// 6. Trade expiry + replay state (Task E)
-    /// 7. Provenance proof vs issuer root + same commitment (Task D)
-    /// 8. Eligibility proof vs credential root + same commitment (Task D)
-    /// 9. Acquire construction (Task E)
-    /// 10. Return VerifiedTrade
+    /// 1. `CheckedTrade::new` — intent/commitment correspondence.
+    /// 2. Read-only replay precheck: only "no record", `CREATED` or `VERIFIED`
+    ///    may proceed. `FAILED` requires an explicit
+    ///    [`PersistentReplayStore::retry_after_failure`] (with txid
+    ///    acknowledgement) first; `CONSUMED`/`EXPIRED` are terminal; active
+    ///    settlement states are replays.
+    /// 3. Trade expiry (`now > expiry` expired, `now == expiry` valid). An
+    ///    existing `CREATED`/`VERIFIED` record is moved to `EXPIRED`; no record
+    ///    is ever created for an expired trade.
+    /// 4. Issuer + credential root authentication, currentness, freshness,
+    ///    `trade_expiry <= min(root expiries)`.
+    /// 5. Recipient binding (F-02) and live control of that receiver.
+    /// 6. Provenance proof, then 7. eligibility proof, against the same checked
+    ///    commitment and the authenticated roots.
+    /// 8. Only now: create (if absent) → `VERIFIED` → `SETTLEMENT_CONSTRUCTED`,
+    ///    each a compare-and-swap on the authoritative store. A lost race or a
+    ///    persistence error rejects.
+    ///
+    /// A `VERIFIED` record found at step 2 (e.g. a crash between verify and
+    /// acquire) is only locked after steps 3–7 pass again in this call.
+    ///
+    /// # Errors
+    ///
+    /// Any failed check, lifecycle rejection, CAS conflict or persistence error.
     pub fn evaluate(&self, input: GateInput) -> Result<VerifiedTrade, GateRejection> {
-        // Step 1: Parse — already typed TradeIntent + TradeCommitment, no ticker/symbol fields.
+        use zwa_protocol::lifecycle::TradeLifecycleState as S;
 
-        // Step 2: Checked trade context — fix ZWA-REL-001
+        // 1. Checked trade context — fix ZWA-REL-001.
         let checked_trade = CheckedTrade::new(input.intent, input.commitment).map_err(|e| {
             match e {
                 zwa_protocol::error::ProtocolError::CommitmentMismatch { expected, actual } => {
@@ -321,16 +335,36 @@ where
                 other => GateRejection::Replay(ReplayError::Protocol(other)),
             }
         })?;
+        let commitment = checked_trade.commitment();
 
-        // Step 6a: Trade expiry check before any heavy work (frozen predicate now > expiry)
+        // 2. Read-only replay precheck (no mutation).
+        let existing = self
+            .replay_store
+            .get(commitment)
+            .map_err(GateRejection::Replay)?;
+        if let Some(record) = existing {
+            match record.state() {
+                S::Created | S::Verified => {}
+                other => return Err(state_rejection(other)),
+            }
+        }
+
+        // 3. Trade expiry (frozen predicate: expired iff now > expiry).
         if checked_trade.intent().is_expired_at(input.now) {
+            if existing.is_some() {
+                // CREATED / VERIFIED → EXPIRED (terminal), persisted by CAS.
+                self.replay_store
+                    .expire(commitment, input.now)
+                    .map_err(GateRejection::Replay)?;
+            }
             return Err(GateRejection::ExpiredTrade {
                 expiry: checked_trade.intent().expiry.get(),
                 now: input.now.get(),
             });
         }
 
-        // Step 3 & 4: Authenticate roots
+        // 4. Authenticate roots: signature, approved key, current version,
+        //    freshness, trade_expiry <= root expiry, combined minimum.
         let auth_issuer = self
             .issuer_authenticator
             .authenticate(
@@ -349,7 +383,6 @@ where
             )
             .map_err(GateRejection::RootAuth)?;
 
-        // Combined expiry: trade_expiry ≤ min(issuer, credential)
         check_combined_root_expiry(
             checked_trade.intent().expiry,
             &auth_issuer,
@@ -357,14 +390,14 @@ where
         )
         .map_err(GateRejection::RootAuth)?;
 
-        // Step 5 (F-02): bind the raw approved receiver to the trade.
+        // 5a (F-02): bind the raw approved receiver to the trade.
         //
         // Chain established here, using only frozen M1 functions:
         //   (1) intent.recipient_commitment
         //         == H(RCPBIND1, subject, H(RECEIVR1, approved_receiver))   [this check]
-        //   (2) the eligibility proof (Phase1B, verified in step 7 against the
-        //       same checked trade commitment) proves the credential leaf's
-        //       receiver commitment R_c and subject S satisfy
+        //   (2) the eligibility proof (Phase1B, step 7, same checked trade
+        //       commitment) proves the credential leaf's receiver commitment
+        //       R_c and subject S satisfy
         //         intent.recipient_commitment == H(RCPBIND1, S, R_c)
         //   (3) control is verified below for exactly `approved_receiver`
         //       (challenge.receiver == response.receiver == approved_receiver).
@@ -383,17 +416,15 @@ where
             return Err(GateRejection::RecipientBindingMismatch);
         }
 
-        // Step 5b: Live wallet control of that exact receiver
-        // Trade expiry vs challenge expiry
+        // 5b: live wallet control of that exact receiver.
         RecipientControlAuthenticator::check_trade_expiry(
             checked_trade.intent().expiry,
             &input.control_challenge,
         )
         .map_err(GateRejection::Control)?;
 
-        // Challenge must be bound to this trade commitment
         RecipientControlAuthenticator::check_trade_commitment(
-            checked_trade.commitment(),
+            commitment,
             &input.control_challenge,
         )
         .map_err(GateRejection::Control)?;
@@ -414,83 +445,8 @@ where
             return Err(GateRejection::RecipientBindingMismatch);
         }
 
-        // Step 6b: Replay state — create or recover, then verify
-        // Enforces canonical lifecycle, terminal CONSUMED/EXPIRED, retry budget
-        let commitment = checked_trade.commitment();
-        let state_opt = self.replay_store.state(commitment).map_err(GateRejection::Replay)?;
-
-        match state_opt {
-            None => {
-                // No record — create via checked trade only
-                self.replay_store
-                    .create_checked(&checked_trade)
-                    .map_err(GateRejection::Replay)?;
-            }
-            Some(s) => {
-                use zwa_protocol::lifecycle::TradeLifecycleState;
-                match s {
-                    TradeLifecycleState::Created => {
-                        // Will verify below
-                    }
-                    TradeLifecycleState::Failed => {
-                        // For gate, we require caller to have retried? For simplicity,
-                        // we attempt retry with acknowledged txid None if no prior txid,
-                        // else need to handle. Here we try to retry with None and if it fails
-                        // due to txid, we return IllegalState to force explicit retry handling
-                        // outside gate. For MVP gate, we will attempt to retry with the
-                        // persisted prior_txid if any.
-                        let existing = self.replay_store.get(commitment).map_err(GateRejection::Replay)?;
-                        let ack = existing.and_then(|r| r.prior_txid());
-                        // If retry fails, propagate as Replay error
-                        match self.replay_store.retry_after_failure(commitment, ack, input.now) {
-                            Ok(_) => {}
-                            Err(e) => return Err(GateRejection::Replay(e)),
-                        }
-                    }
-                    TradeLifecycleState::Verified => {
-                        // Already verified — proceed to proof checks
-                    }
-                    TradeLifecycleState::SettlementConstructed
-                    | TradeLifecycleState::Submitted
-                    | TradeLifecycleState::Confirmed => {
-                        return Err(GateRejection::IllegalState {
-                            state: format!("{s:?}"),
-                        });
-                    }
-                    TradeLifecycleState::Consumed => {
-                        return Err(GateRejection::AlreadyConsumed);
-                    }
-                    TradeLifecycleState::Expired => {
-                        return Err(GateRejection::AlreadyExpired);
-                    }
-                }
-            }
-        }
-
-        // Now ensure state is CREATED then verify, or already VERIFIED
-        let current_state = self.replay_store.state(commitment).map_err(GateRejection::Replay)?;
-        if let Some(zwa_protocol::lifecycle::TradeLifecycleState::Created) = current_state {
-            self.replay_store
-                .verify(commitment, input.now)
-                .map_err(GateRejection::Replay)?;
-        }
-
-        // Verify state is now VERIFIED before proof checks
-        match self.replay_store.state(commitment).map_err(GateRejection::Replay)? {
-            Some(zwa_protocol::lifecycle::TradeLifecycleState::Verified) => {}
-            Some(s) => {
-                return Err(GateRejection::IllegalState {
-                    state: format!("{s:?} after verify"),
-                })
-            }
-            None => {
-                return Err(GateRejection::IllegalState {
-                    state: "no record after create".to_string(),
-                })
-            }
-        }
-
-        // Step 7 & 8: Proof verification against same checked commitment
+        // 6 + 7: provenance, then eligibility, against the same checked
+        // commitment and the authenticated roots.
         verify_trade_proofs(
             &self.provenance_verifier,
             &self.eligibility_verifier,
@@ -502,12 +458,35 @@ where
         )
         .map_err(GateRejection::ProofInvalid)?;
 
-        // Step 9: Acquire settlement construction — compare-and-set lock, expiry-gated
+        // 8. Every check passed — only now touch replay state. Re-read: the
+        //    precheck value may be stale; every write below is a CAS.
+        let current = self
+            .replay_store
+            .get(commitment)
+            .map_err(GateRejection::Replay)?;
+        match current.map(|r| r.state()) {
+            None => {
+                self.replay_store
+                    .create_checked(&checked_trade)
+                    .map_err(GateRejection::Replay)?;
+                self.replay_store
+                    .verify(commitment, input.now)
+                    .map_err(GateRejection::Replay)?;
+            }
+            Some(S::Created) => {
+                self.replay_store
+                    .verify(commitment, input.now)
+                    .map_err(GateRejection::Replay)?;
+            }
+            Some(S::Verified) => {}
+            Some(other) => return Err(state_rejection(other)),
+        }
+
+        // Compare-and-set construction lock: at most one approval per trade.
         self.replay_store
             .acquire_construction(commitment, input.now)
             .map_err(GateRejection::Replay)?;
 
-        // Step 10: Return verified trade ready for settlement adapter — opaque MatcherApproval
         Ok(VerifiedTrade {
             checked_trade,
             authenticated_issuer_root: auth_issuer,
@@ -515,6 +494,19 @@ where
             verified_control,
             _private: (),
         })
+    }
+}
+
+/// Maps a replay state that may not enter verification to its rejection.
+fn state_rejection(state: zwa_protocol::lifecycle::TradeLifecycleState) -> GateRejection {
+    use zwa_protocol::lifecycle::TradeLifecycleState as S;
+    match state {
+        S::Consumed => GateRejection::AlreadyConsumed,
+        S::Expired => GateRejection::AlreadyExpired,
+        S::Failed => GateRejection::RetryRequired,
+        other => GateRejection::IllegalState {
+            state: format!("{other:?}"),
+        },
     }
 }
 
@@ -949,6 +941,254 @@ mod tests {
         input.recipient_subject_commitment = zwa_commitments::subject_commitment(other);
         let err = gate.evaluate(input).unwrap_err();
         assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+    }
+
+    // --- F-07: ordering and persisted state after rejection ---
+
+    use zwa_protocol::lifecycle::{FailureReason, SettlementTxId, TradeLifecycleState};
+
+    const AT_EXPIRY: UnixSeconds = UnixSeconds::new(2_000_000_000);
+    const AFTER_EXPIRY: UnixSeconds = UnixSeconds::new(2_000_000_001);
+    const TXID_1: SettlementTxId = SettlementTxId::new([0x11; 32]);
+
+    fn calls(gate: &TestGate) -> (usize, usize) {
+        (gate.provenance_verifier.calls(), gate.eligibility_verifier.calls())
+    }
+
+    fn state_of(gate: &TestGate, c: TradeCommitment) -> Option<TradeLifecycleState> {
+        gate.replay_store().state(c).unwrap()
+    }
+
+    fn issuer_envelope(signer: &SigningKey, version: u64, from: u64, to: u64) -> IssuerRootEnvelope {
+        let payload = zwa_credentials::IssuerRootPayload::new(
+            AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(),
+            IssuerKeyId::new(b"issuer-atlas").unwrap(),
+            RootVersion::new(version),
+            UnixSeconds::new(from),
+            UnixSeconds::new(to),
+        )
+        .unwrap();
+        let sig = signer.sign(&payload.canonical_bytes());
+        zwa_credentials::IssuerRootEnvelope::new(payload, OpaqueSignature::new(&sig.to_bytes()).unwrap())
+    }
+
+    fn credential_envelope(signer: &SigningKey, version: u64, from: u64, to: u64) -> CredentialRootEnvelope {
+        let payload = zwa_credentials::CredentialRootPayload::new(
+            ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap(),
+            AuthorityKeyId::new(b"cred-auth-1").unwrap(),
+            RootVersion::new(version),
+            UnixSeconds::new(from),
+            UnixSeconds::new(to),
+        )
+        .unwrap();
+        let sig = signer.sign(&payload.canonical_bytes());
+        zwa_credentials::CredentialRootEnvelope::new(payload, OpaqueSignature::new(&sig.to_bytes()).unwrap())
+    }
+
+    #[test]
+    fn f07_invalid_provenance_leaves_no_verified_record() {
+        let (mut input, gate) = valid_gate_input();
+        let c = input.commitment;
+        input.provenance_proof = fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_B_COMMITMENT);
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::ProofInvalid(_)), "got {err:?}");
+        assert_eq!(state_of(&gate, c), None);
+        assert_eq!(calls(&gate), (1, 0), "eligibility must not run after provenance fails");
+    }
+
+    #[test]
+    fn f07_invalid_eligibility_leaves_no_verified_record() {
+        let (mut input, gate) = valid_gate_input();
+        let c = input.commitment;
+        input.eligibility_proof = fake_proof(ELIG_LABEL, REAL_CREDENTIAL_ROOT, TRADE_COMMITMENT);
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::ProofInvalid(_)), "got {err:?}");
+        assert_eq!(state_of(&gate, c), None);
+        assert_eq!(calls(&gate), (1, 1));
+    }
+
+    #[test]
+    fn f07_failed_control_leaves_no_record_and_runs_no_proof() {
+        let (mut input, gate) = valid_gate_input();
+        let c = input.commitment;
+        input.control_response = RecipientControlResponse::sign(&input.control_challenge, &signing_key(99));
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::Control(_)), "got {err:?}");
+        assert_eq!(state_of(&gate, c), None);
+        assert_eq!(calls(&gate), (0, 0));
+    }
+
+    #[test]
+    fn f07_root_failures_leave_no_record_and_run_no_later_check() {
+        let now = 1_900_000_100;
+        type Mutation = Box<dyn Fn(&mut GateInput)>;
+        let cases: Vec<(&str, Mutation)> = vec![
+            ("wrong issuer signer", Box::new(move |i: &mut GateInput| {
+                i.issuer_envelope = issuer_envelope(&signing_key(77), 1, 1_900_000_000, 2_100_000_000);
+            })),
+            ("wrong credential signer", Box::new(move |i: &mut GateInput| {
+                i.credential_envelope = credential_envelope(&signing_key(78), 1, 1_900_000_000, 2_100_000_000);
+            })),
+            ("expired issuer root", Box::new(move |i: &mut GateInput| {
+                i.issuer_envelope = issuer_envelope(&signing_key(1), 1, 1_800_000_000, now - 1);
+            })),
+            ("not-yet-valid issuer root", Box::new(move |i: &mut GateInput| {
+                i.issuer_envelope = issuer_envelope(&signing_key(1), 1, now + 1, 2_100_000_000);
+            })),
+            ("expired credential root", Box::new(move |i: &mut GateInput| {
+                i.credential_envelope = credential_envelope(&signing_key(2), 1, 1_800_000_000, now - 1);
+            })),
+            ("not-yet-valid credential root", Box::new(move |i: &mut GateInput| {
+                i.credential_envelope = credential_envelope(&signing_key(2), 1, now + 1, 2_100_000_000);
+            })),
+            ("stale (superseded) issuer version", Box::new(move |i: &mut GateInput| {
+                i.issuer_envelope = issuer_envelope(&signing_key(1), 2, 1_900_000_000, 2_100_000_000);
+            })),
+            ("stale (superseded) credential version", Box::new(move |i: &mut GateInput| {
+                i.credential_envelope = credential_envelope(&signing_key(2), 2, 1_900_000_000, 2_100_000_000);
+            })),
+            ("root expires before trade", Box::new(move |i: &mut GateInput| {
+                i.issuer_envelope = issuer_envelope(&signing_key(1), 1, 1_900_000_000, 1_999_999_999);
+            })),
+        ];
+        for (name, mutate) in cases {
+            let (mut input, gate) = valid_gate_input();
+            let c = input.commitment;
+            mutate(&mut input);
+            let err = gate.evaluate(input).unwrap_err();
+            assert!(matches!(err, GateRejection::RootAuth(_)), "{name}: got {err:?}");
+            assert_eq!(state_of(&gate, c), None, "{name}");
+            assert_eq!(calls(&gate), (0, 0), "{name}");
+        }
+    }
+
+    #[test]
+    fn f07_now_equal_expiry_is_valid() {
+        let (mut input, gate) = valid_gate_input();
+        let c = input.commitment;
+        input.now = AT_EXPIRY;
+        gate.evaluate(input).unwrap();
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+    }
+
+    #[test]
+    fn f07_expired_trade_without_record_creates_nothing() {
+        let (mut input, gate) = valid_gate_input();
+        let c = input.commitment;
+        input.now = AFTER_EXPIRY;
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::ExpiredTrade { .. }), "got {err:?}");
+        assert_eq!(state_of(&gate, c), None);
+        assert_eq!(calls(&gate), (0, 0));
+    }
+
+    #[test]
+    fn f07_expired_trade_with_created_record_is_persisted_expired() {
+        let (input, gate) = valid_gate_input();
+        let c = input.commitment;
+        gate.evaluate(input).unwrap();
+        gate.replay_store().fail(c, FailureReason::ConstructionFailed).unwrap();
+        gate.replay_store().retry_after_failure(c, None, UnixSeconds::new(1_900_000_200)).unwrap();
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Created));
+
+        let (mut late, _) = valid_gate_input();
+        late.now = AFTER_EXPIRY;
+        let before = calls(&gate);
+        let err = gate.evaluate(late).unwrap_err();
+        assert!(matches!(err, GateRejection::ExpiredTrade { .. }), "got {err:?}");
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Expired));
+        assert_eq!(calls(&gate), before);
+
+        // Terminal: even a fully valid, timely request is refused.
+        let (again, _) = valid_gate_input();
+        assert!(matches!(gate.evaluate(again).unwrap_err(), GateRejection::AlreadyExpired));
+    }
+
+    #[test]
+    fn f07_failed_requires_explicit_retry_then_full_reverification() {
+        let (input, gate) = valid_gate_input();
+        let c = input.commitment;
+        let now = input.now;
+        gate.evaluate(input).unwrap();
+        gate.replay_store().submit(c, TXID_1, now).unwrap();
+        gate.replay_store().fail(c, FailureReason::SubmissionFailed).unwrap();
+        let after_first = calls(&gate);
+        assert_eq!(after_first, (1, 1));
+
+        // The gate never retries by itself (old code auto-acknowledged the txid).
+        let (again, _) = valid_gate_input();
+        assert!(matches!(gate.evaluate(again).unwrap_err(), GateRejection::RetryRequired));
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Failed));
+        assert_eq!(calls(&gate), after_first);
+
+        // Explicit retry needs the exact prior txid.
+        assert!(gate.replay_store().retry_after_failure(c, None, now).is_err());
+        let rec = gate.replay_store().retry_after_failure(c, Some(TXID_1), now).unwrap();
+        assert_eq!(rec.state(), TradeLifecycleState::Created);
+        assert_eq!(rec.retry_count(), 1);
+
+        // CREATED after retry: a failing proof must not produce VERIFIED.
+        let (mut bad, _) = valid_gate_input();
+        bad.eligibility_proof = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, TRADE_B_COMMITMENT);
+        assert!(matches!(gate.evaluate(bad).unwrap_err(), GateRejection::ProofInvalid(_)));
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Created));
+
+        // Full re-verification: both proofs run again, then construction.
+        let (good, _) = valid_gate_input();
+        gate.evaluate(good).unwrap();
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+        assert_eq!(calls(&gate), (after_first.0 + 2, after_first.1 + 2));
+        let rec = gate.replay_store().get(c).unwrap().unwrap();
+        assert_eq!(rec.retry_count(), 1);
+        assert_eq!(rec.prior_txid(), None);
+    }
+
+    #[test]
+    fn f07_verified_record_is_reverified_before_construction() {
+        // Simulates a crash between VERIFIED and acquire.
+        let (input, gate) = valid_gate_input();
+        let c = input.commitment;
+        let checked = CheckedTrade::new(input.intent, c).unwrap();
+        gate.replay_store().create_checked(&checked).unwrap();
+        gate.replay_store().verify(c, input.now).unwrap();
+
+        let (mut bad, _) = valid_gate_input();
+        bad.provenance_proof = fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_B_COMMITMENT);
+        assert!(matches!(gate.evaluate(bad).unwrap_err(), GateRejection::ProofInvalid(_)));
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Verified));
+
+        gate.evaluate(input).unwrap();
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+    }
+
+    #[test]
+    fn f07_replay_attempt_rejected_before_any_proof_runs() {
+        let (input, gate) = valid_gate_input();
+        let c = input.commitment;
+        gate.evaluate(input).unwrap();
+        let before = calls(&gate);
+        let (again, _) = valid_gate_input();
+        assert!(matches!(gate.evaluate(again).unwrap_err(), GateRejection::IllegalState { .. }));
+        assert_eq!(calls(&gate), before);
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+    }
+
+    #[test]
+    fn f07_concurrent_identical_requests_yield_exactly_one_approval() {
+        let (_, gate) = valid_gate_input();
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let gate = &gate;
+                    scope.spawn(move || {
+                        let (input, _) = valid_gate_input();
+                        gate.evaluate(input)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "{results:?}");
     }
 
     #[test]
