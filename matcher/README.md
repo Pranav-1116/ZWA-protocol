@@ -292,7 +292,7 @@ Compliance is matcher-enforced. ZSA settlement is experimental QEDIT stack, not 
 > (hashes `4831d3…`, `879d42…`) — they were generated from the modified variant,
 > so the M1 owner must re-issue or approve keys for the frozen circuits; (3) `crates/settlement` and `crates/zcash-adapter`
 > (M4) received a compile-only adaptation to the new replay/gate API, which is pending
-> review by the M4 owner (see `docs/matcher-handoff.md`). Statements below that predate the
+> review by the M4 owner (see `docs/matcher-handoff.md`) (superseded by the M3 remediation: that M4 prototype is now archived, uncompiled, under `archive/m4-prototype/`; `crates/settlement` is the M3 `ApprovedSettlement` crate). Statements below that predate the
 > remediation are historical.
 
 **One complete valid flow: real signatures, real proofs, real recipient control, persistent replay → MatcherApproval**
