@@ -4,32 +4,20 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Pranav-1116/ZWA-protocol"
-description = "Phase 3 settlement adapter for ZWA Protocol — V1-V5 production-level hardening. Opaque boundary, non-custodial auth, experimental ZSA atomic swap with QEDIT pins, recipient-control real path, production replay protection with versioned persistence."
-readme = "PRODUCTION.md"
-
-[features]
-default = []
-sqlite = ["zwa-matcher/sqlite", "dep:rusqlite"]
+description = "Milestone 3 for ZWA Protocol: RFQ terms, independent party authorization and the immutable ApprovedSettlement handoff to Milestone 4. No transaction construction, submission or private keys."
+readme = "README.md"
 
 [dependencies]
 zwa-matcher = { path = "../../matcher", version = "0.1.0" }
 zwa-protocol = { path = "../protocol", version = "0.1.0" }
 zwa-commitments = { path = "../commitments", version = "0.1.0" }
-zwa-credentials = { path = "../credentials", version = "0.1.0" }
 thiserror = { workspace = true }
-ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+ed25519-dalek = { version = "2.1.1" }
 getrandom = "0.2"
 sha2 = { workspace = true }
-hex = "0.4.3"
-zeroize = { version = "1", features = ["derive"] }
-rusqlite = { version = "0.31", optional = true, features = ["bundled"] }
 
 [dev-dependencies]
-zwa-matcher = { path = "../../matcher", version = "0.1.0" }
-zwa-protocol = { path = "../protocol", version = "0.1.0" }
 zwa-credentials = { path = "../credentials", version = "0.1.0" }
-zwa-commitments = { path = "../commitments", version = "0.1.0" }
-ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 
 [lints]
 workspace = true
