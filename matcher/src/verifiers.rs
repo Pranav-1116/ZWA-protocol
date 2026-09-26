@@ -381,8 +381,12 @@ impl ProvenanceVerifierBackend {
     /// Loads from embedded fixture `tests/fixtures/groth16/provenance-vkey.json`
     /// with hash check.
     pub fn from_fixture() -> Result<Self, Groth16VerificationError> {
-        // Embedded vkey — generated via circom2 + snarkjs from rwa_trade_provenance_v1.circom
-        // with quadratic binding fix for IC non-zero.
+        // Embedded vkey — fixture committed in ef7fc73, kept byte-for-byte
+        // unchanged (pinned by EXPECTED_HASH). It was generated from a variant
+        // of rwa_trade_provenance_v1.circom carrying an extra `dummyProd`
+        // constraint; the circuit source has been restored to the frozen M1
+        // version, so this key must be re-issued/approved by the M1 owner
+        // before it is treated as the frozen circuit's key.
         const VKEY_JSON: &str = include_str!("../../tests/fixtures/groth16/provenance-vkey.json");
         // Expected hash computed from fixture — prevents substitution
         const EXPECTED_HASH: &str = "4831d3eef9575ef7daf318eb8767e1a39ef1e26da20339ddda137b1e246f1350";

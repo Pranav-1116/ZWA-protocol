@@ -286,9 +286,11 @@ Compliance is matcher-enforced. ZSA settlement is experimental QEDIT stack, not 
 > re-auditor, not the implementer. Open items: (1) there is no end-to-end ALLOW
 > with *real* Groth16 proofs, because the fixture proofs are for two different
 > trades (provenance `7409…`, eligibility `10187…`) and regenerating proofs is
-> out of M2 scope; (2) frozen circuits were modified in `ef7fc73` (`dummyProd`
-> constraint + regenerated VKs) and could not be reverted without an M1 frozen
-> VK to return to; (3) the replay/gate API change breaks `crates/settlement`
+> out of M2 scope; (2) the frozen circuits modified in `ef7fc73` (`dummyProd`
+> constraint) have been restored to the frozen M1 source (`b017962`), while the
+> Groth16 key/proof fixtures in `tests/fixtures/groth16/` are kept unchanged
+> (hashes `4831d3…`, `879d42…`) — they were generated from the modified variant,
+> so the M1 owner must re-issue or approve keys for the frozen circuits; (3) the replay/gate API change breaks `crates/settlement`
 > (M4) until its owner adapts it. Statements below that predate the
 > remediation are historical.
 
