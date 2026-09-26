@@ -20,7 +20,7 @@
 //!   Groth16 proof are always `Invalid { ProofMalformed }`. There is no JSON
 //!   "public_inputs" fallback in any build: not in default builds, not under
 //!   `--all-features`, and not under `cfg(test)`. The former `test-helpers`
-//!   feature no longer enables anything (see `matcher/Cargo.toml`).
+//!   feature has been deleted from `matcher/Cargo.toml`.
 //! - Tests that need a proof verifier which does not run Groth16 must inject an
 //!   explicit fake through the frozen [`ProvenanceVerifier`] /
 //!   [`EligibilityVerifier`] traits (see `MatcherProofGate` and

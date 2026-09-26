@@ -1192,6 +1192,41 @@ mod tests {
     }
 
     #[test]
+    fn approval_gated_replay_api_on_downstream_store() {
+        let (input, gate) = valid_gate_input();
+        let now = input.now;
+        let approval = gate.evaluate(input).unwrap();
+        // A separate (e.g. settlement-side) store can only be driven with the approval.
+        let downstream = PersistentReplayStore::lazy(InMemoryPersistence::new(), 3);
+        assert_eq!(
+            downstream.create_from_approval(&approval).unwrap().state(),
+            zwa_protocol::lifecycle::TradeLifecycleState::Created
+        );
+        assert!(downstream.create_from_approval(&approval).is_err(), "duplicate create");
+        downstream.verify_approved(&approval, now).unwrap();
+        let locked = downstream.acquire_construction_approved(&approval, now).unwrap();
+        assert_eq!(locked.state(), zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed);
+        assert!(
+            downstream.acquire_construction_approved(&approval, now).is_err(),
+            "construction lock has exactly one winner"
+        );
+    }
+
+    #[test]
+    fn lazy_store_still_fails_closed_on_corrupt_data() {
+        use crate::replay::JsonFilePersistence;
+        let path = std::env::temp_dir().join(format!("zwa-lazy-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let persistence = JsonFilePersistence::new(&path).unwrap();
+        std::fs::write(&path, b"{ corrupt").unwrap();
+        let store = PersistentReplayStore::lazy(persistence, 3);
+        let c = TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
+        assert!(store.get(c).is_err());
+        assert!(store.state(c).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn gate_allows_valid_private_trade() {
         let (input, gate) = valid_gate_input();
         let verified = gate.evaluate(input).unwrap();

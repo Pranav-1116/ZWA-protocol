@@ -14,7 +14,7 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-zwa-matcher = { path = "../../matcher", version = "0.1.0", features = ["test-helpers"] }
+zwa-matcher = { path = "../../matcher", version = "0.1.0" }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 zwa-credentials = { path = "../credentials", version = "0.1.0" }
 

@@ -9,14 +9,6 @@ description = "Matcher gate for ZWA Protocol - checked intent/commitment, root a
 [features]
 default = []
 sqlite = ["rusqlite"]
-# INERT. Enables no code in this crate: there is no `cfg(feature = "test-helpers")`
-# anywhere in zwa-matcher, so `--all-features` cannot activate a proof bypass
-# (M2 remediation F-01). The name is kept only because downstream manifests
-# owned by other milestones (crates/settlement, crates/zcash-adapter) still
-# request it and Cargo refuses to resolve the workspace if it disappears.
-# Tests needing non-Groth16 verifiers must inject them explicitly through the
-# frozen `ProvenanceVerifier` / `EligibilityVerifier` traits.
-test-helpers = []
 
 [dependencies]
 zwa-protocol = { path = "../crates/protocol", version = "0.1.0" }

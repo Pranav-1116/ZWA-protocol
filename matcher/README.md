@@ -151,7 +151,7 @@ gate.verify_both(&auth_issuer_root, &auth_credential_root, &provenance_proof, &e
 ```
 
 Enforces:
-- Malformed or non-Groth16 input **always** rejects (`ProofMalformed`). There is no JSON/"public_inputs" fallback in any build or feature combination; `--all-features` enables no bypass. The `test-helpers` feature is inert (kept only so dependants' manifests resolve) and a source-scan test asserts no bypass symbol or `cfg(feature = "test-helpers")` exists.
+- Malformed or non-Groth16 input **always** rejects (`ProofMalformed`). There is no JSON/"public_inputs" fallback in any build or feature combination; `--all-features` enables no bypass. The `test-helpers` feature has been deleted, and a source-scan test asserts no bypass symbol or `cfg(feature = "test-helpers")` exists.
 - `PublicInputMismatch` if the proof's public signals are for another root or commitment (splicing).
 - `ProofRejected` if the pairing check fails. Unconfigured backends fail closed.
 - Test doubles are `#[cfg(test)]` only and injected through the `ProvenanceVerifier`/`EligibilityVerifier` traits (`gate::tests::FakeVerifier`).
@@ -184,7 +184,7 @@ Backends:
 
 Corrupt, tampered, legacy (v1 / bare array / old SQLite table), empty or unknown-version data is rejected at open/load — never silently skipped, migrated or rewritten.
 
-API: `PersistentReplayStore::new(p, max_retries) -> Result<Self, ReplayError>` (validates all stored records); `state()`/`get()` return `Result<Option<_>>`. `create_checked`, `verify`, `acquire_construction` are `pub(crate)`: only `MatcherGate::evaluate` can create, verify and lock a trade. `submit`, `confirm`, `consume`, `fail`, `expire`, `retry_after_failure(ack_txid, now)` remain public for the settlement side.
+API: `PersistentReplayStore::new(p, max_retries) -> Result<Self, ReplayError>` (validates all stored records) or `PersistentReplayStore::lazy(p, max_retries)` (no startup scan; every operation still fails closed); other crates drive a store only with a `&MatcherApproval` (`create_from_approval`, `verify_approved`, `acquire_construction_approved`); `state()`/`get()` return `Result<Option<_>>`. `create_checked`, `verify`, `acquire_construction` are `pub(crate)`: only `MatcherGate::evaluate` can create, verify and lock a trade. `submit`, `confirm`, `consume`, `fail`, `expire`, `retry_after_failure(ack_txid, now)` remain public for the settlement side.
 
 Tests: exact restart round-trip (JSON; SQLite) of retry count, txids, failure reason, expiry; injected persistence failure does not advance state; concurrent CAS has exactly one winner (shared in-memory, two SQLite connections to one DB); stale CAS rejected on every backend; corrupt/legacy/tampered data fails closed.
 
@@ -290,8 +290,9 @@ Compliance is matcher-enforced. ZSA settlement is experimental QEDIT stack, not 
 > constraint) have been restored to the frozen M1 source (`b017962`), while the
 > Groth16 key/proof fixtures in `tests/fixtures/groth16/` are kept unchanged
 > (hashes `4831d3…`, `879d42…`) — they were generated from the modified variant,
-> so the M1 owner must re-issue or approve keys for the frozen circuits; (3) the replay/gate API change breaks `crates/settlement`
-> (M4) until its owner adapts it. Statements below that predate the
+> so the M1 owner must re-issue or approve keys for the frozen circuits; (3) `crates/settlement` and `crates/zcash-adapter`
+> (M4) received a compile-only adaptation to the new replay/gate API, which is pending
+> review by the M4 owner (see `docs/matcher-handoff.md`). Statements below that predate the
 > remediation are historical.
 
 **One complete valid flow: real signatures, real proofs, real recipient control, persistent replay → MatcherApproval**
