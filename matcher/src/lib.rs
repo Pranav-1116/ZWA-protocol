@@ -57,8 +57,8 @@ pub use control::{
 pub use control::FakeControlVerifier;
 pub use gate::{GateInput, GateRejection, MatcherApproval, MatcherGate, VerifiedTrade};
 pub use replay::{
-    InMemoryPersistence, JsonFilePersistence, PersistentReplayStore, ReplayPersistence,
-    RocksDbPersistence, PersistenceError, ReplayError, PERSISTENCE_SCHEMA_VERSION,
+    InMemoryPersistence, JsonFilePersistence, PersistenceError, PersistentReplayStore,
+    ReplayError, ReplayPersistence, ReplayRecord, RocksDbPersistence, PERSISTENCE_SCHEMA_VERSION,
 };
 #[cfg(feature = "sqlite")]
 pub use replay::SqlitePersistence;

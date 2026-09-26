@@ -417,7 +417,7 @@ where
         // Step 6b: Replay state — create or recover, then verify
         // Enforces canonical lifecycle, terminal CONSUMED/EXPIRED, retry budget
         let commitment = checked_trade.commitment();
-        let state_opt = self.replay_store.state(commitment);
+        let state_opt = self.replay_store.state(commitment).map_err(GateRejection::Replay)?;
 
         match state_opt {
             None => {
@@ -439,7 +439,7 @@ where
                         // due to txid, we return IllegalState to force explicit retry handling
                         // outside gate. For MVP gate, we will attempt to retry with the
                         // persisted prior_txid if any.
-                        let existing = self.replay_store.get(commitment);
+                        let existing = self.replay_store.get(commitment).map_err(GateRejection::Replay)?;
                         let ack = existing.and_then(|r| r.prior_txid());
                         // If retry fails, propagate as Replay error
                         match self.replay_store.retry_after_failure(commitment, ack, input.now) {
@@ -468,7 +468,7 @@ where
         }
 
         // Now ensure state is CREATED then verify, or already VERIFIED
-        let current_state = self.replay_store.state(commitment);
+        let current_state = self.replay_store.state(commitment).map_err(GateRejection::Replay)?;
         if let Some(zwa_protocol::lifecycle::TradeLifecycleState::Created) = current_state {
             self.replay_store
                 .verify(commitment, input.now)
@@ -476,7 +476,7 @@ where
         }
 
         // Verify state is now VERIFIED before proof checks
-        match self.replay_store.state(commitment) {
+        match self.replay_store.state(commitment).map_err(GateRejection::Replay)? {
             Some(zwa_protocol::lifecycle::TradeLifecycleState::Verified) => {}
             Some(s) => {
                 return Err(GateRejection::IllegalState {
@@ -722,7 +722,7 @@ mod tests {
         approved_control.insert(recv_b, control_key_b().verifying_key());
         let control_auth = crate::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
 
-        let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3);
+        let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3).unwrap();
 
         let gate = MatcherGate::new(
             issuer_auth,
@@ -870,7 +870,7 @@ mod tests {
         assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
         assert_eq!(gate.provenance_verifier.calls(), 0);
         assert_eq!(gate.eligibility_verifier.calls(), 0);
-        assert!(gate.replay_store().state(commitment).is_none());
+        assert!(gate.replay_store().state(commitment).unwrap().is_none());
     }
 
     #[test]
@@ -995,7 +995,7 @@ mod tests {
         let first = gate.evaluate(input.clone()).unwrap();
         assert_eq!(first.commitment().to_string(), TRADE_COMMITMENT);
         assert_eq!(
-            gate.replay_store().state(commitment),
+            gate.replay_store().state(commitment).unwrap(),
             Some(zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed)
         );
 
@@ -1011,7 +1011,7 @@ mod tests {
 
         // Still only one record, still SETTLEMENT_CONSTRUCTED
         assert_eq!(
-            gate.replay_store().state(commitment),
+            gate.replay_store().state(commitment).unwrap(),
             Some(zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed)
         );
     }
@@ -1025,7 +1025,7 @@ mod tests {
         // Early failure 1: Commitment mismatch (Step 2) — cheapest gate
         let (mut input, gate) = valid_gate_input();
         let commitment = input.commitment;
-        assert!(gate.replay_store().state(commitment).is_none(), "precondition empty");
+        assert!(gate.replay_store().state(commitment).unwrap().is_none(), "precondition empty");
         input.intent.offered_amount = TradeAmount::new(9999);
         let err = gate.evaluate(input).unwrap_err();
         match err {
@@ -1034,14 +1034,14 @@ mod tests {
         }
         // Replay store must still be empty — no create, no verify, no proof verification, no construction
         assert!(
-            gate.replay_store().state(commitment).is_none(),
+            gate.replay_store().state(commitment).unwrap().is_none(),
             "early commitment mismatch must not create replay record, must not run later verifiers"
         );
 
         // Early failure 2: Root auth failure (Step 3) — before control, replay, proofs
         let (mut input2, gate2) = valid_gate_input();
         let commitment2 = input2.commitment;
-        assert!(gate2.replay_store().state(commitment2).is_none());
+        assert!(gate2.replay_store().state(commitment2).unwrap().is_none());
         // Tamper issuer envelope to have wrong version → VersionNotCurrent
         let sk_issuer = signing_key(1);
         let issuer_payload_bad = zwa_credentials::IssuerRootPayload::new(
@@ -1064,7 +1064,7 @@ mod tests {
             other => panic!("expected RootAuth, got {other:?}"),
         }
         assert!(
-            gate2.replay_store().state(commitment2).is_none(),
+            gate2.replay_store().state(commitment2).unwrap().is_none(),
             "root auth failure must not create replay record, must not run control/proof verifiers"
         );
 
@@ -1079,7 +1079,7 @@ mod tests {
             other => panic!("expected Control failure, got {other:?}"),
         }
         assert!(
-            gate3.replay_store().state(commitment3).is_none(),
+            gate3.replay_store().state(commitment3).unwrap().is_none(),
             "control failure must not create replay record, must not run proof verifiers"
         );
     }
@@ -1203,13 +1203,13 @@ mod tests {
         let (input, gate) = valid_gate_input();
         let commitment = input.commitment;
         // Before evaluate, no record
-        assert!(gate.replay_store().state(commitment).is_none());
+        assert!(gate.replay_store().state(commitment).unwrap().is_none());
 
         let _verified = gate.evaluate(input).unwrap();
 
         // After evaluate, state must be SETTLEMENT_CONSTRUCTED (acquired)
         assert_eq!(
-            gate.replay_store().state(commitment),
+            gate.replay_store().state(commitment).unwrap(),
             Some(zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed)
         );
 
@@ -1275,7 +1275,7 @@ mod tests {
         approved_control.insert(recv_a, vk_control);
         let control_auth = crate::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
         let persistence = JsonFilePersistence::new(&path).unwrap();
-        let replay = PersistentReplayStore::new(persistence, 3);
+        let replay = PersistentReplayStore::new(persistence, 3).unwrap();
         let gate = MatcherGate::new(
             issuer_auth,
             cred_auth,
@@ -1316,9 +1316,9 @@ mod tests {
         assert!(data.contains("schema_version"));
         drop(gate);
         let persistence2 = JsonFilePersistence::new(&path).unwrap();
-        assert_eq!(persistence2.load_all().len(), 1);
+        assert_eq!(persistence2.load_all().unwrap().len(), 1);
         assert_eq!(
-            persistence2.load(commitment).unwrap().state(),
+            persistence2.load(commitment).unwrap().unwrap().state(),
             zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed,
         );
         let _ = fs::remove_file(&path);
