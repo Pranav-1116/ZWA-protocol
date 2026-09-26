@@ -36,7 +36,7 @@
 //!
 //! ## V4: Recipient-Control Real Path — production (MVP + research track)
 //! - MVP: `RecipientControlAuthenticator` Ed25519 registry `BTreeMap<OrchardReceiverBytes, VerifyingKey>` + `CONTROL_DOMAIN = ZWA-RECIPIENT-CTRL-V1` — simple auditable, no Orchard internals
-//! - Real path: `RealOrchardIvkControlVerifier` experimental — `OrchardIvkBytes` 32B private, commitment `SHA256(ivk)` public, diversifier 11B, transmission_key `SHA256(ivk||diversifier)` simulation (real Pallas mul), receiver derivation `diversifier||transmission_key` 43B preserves canonical mapping, nullifier `H(ivk||receiver||trade_commitment)` bound to trade
+//! - Real path: `SimulatedOrchardIvkControlVerifier` experimental — `OrchardIvkBytes` 32B private, commitment `SHA256(ivk)` public, diversifier 11B, transmission_key `SHA256(ivk||diversifier)` simulation (real Pallas mul), receiver derivation `diversifier||transmission_key` 43B preserves canonical mapping, nullifier `H(ivk||receiver||trade_commitment)` bound to trade
 //! - `Box<dyn RecipientControlVerifier>` works for all verifiers — opaque boundary
 //! - Why Ed25519 remains MVP documented: real requires experimental orchard `d91aaf1`, wallet ivk export privacy-sensitive, nullifier requires spend authority, ZK circuit `rwa_orchard_control_v1` not yet implemented
 //! - Fail-closed `UnconfiguredControlVerifier` / `SettlementUnconfiguredControlVerifier`
@@ -70,7 +70,7 @@ use zwa_matcher::replay::ReplayPersistence;
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;
 
-use crate::control::{Ed25519RegistryControlVerifier, RealOrchardIvkControlVerifier};
+use crate::control::{Ed25519RegistryControlVerifier, SimulatedOrchardIvkControlVerifier};
 use crate::replay::{SettlementReplayCoordinator, SettlementReplayError};
 use crate::zsa::{AtomicZsaTransaction, ExperimentalZsaBuilder, EXPERIMENTAL_ZSA_LABEL, ZSA_STACK_PINS};
 use crate::{MatcherApproval, SettlementAdapter, SettlementDraft, SettlementError, SettlementTxId, MockSettlementAdapter};
@@ -121,12 +121,12 @@ impl<P: ReplayPersistence + std::fmt::Debug> ProductionSettlementCoordinator<P> 
 
     /// Builds with real Orchard ivk verifier — experimental research track.
     #[must_use]
-    pub fn with_real_orchard_ivk(
+    pub fn with_simulated_orchard_ivk(
         persistence: P,
         ivks: std::collections::BTreeMap<OrchardReceiverBytes, crate::control::OrchardIvkBytes>,
         max_retries: u32,
     ) -> Self {
-        let verifier = RealOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
+        let verifier = SimulatedOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
         Self::new(persistence, Box::new(verifier), max_retries)
     }
 

@@ -155,11 +155,11 @@ impl SecurityAudit {
 
         // V4: Real path experimental
         checks_passed += 1;
-        details.push("V4: RealOrchardIvkControlVerifier experimental OrchardIvkBytes 32B private commitment SHA256(ivk) public, diversifier 11B, transmission_key SHA256(ivk||diversifier) simulation, receiver diversifier||transmission_key 43B preserves mapping, nullifier H(ivk||receiver||trade_commitment) bound to trade".to_string());
+        details.push("V4: SimulatedOrchardIvkControlVerifier experimental OrchardIvkBytes 32B private commitment SHA256(ivk) public, diversifier 11B, transmission_key SHA256(ivk||diversifier) simulation, receiver diversifier||transmission_key 43B preserves mapping, nullifier H(ivk||receiver||trade_commitment) bound to trade".to_string());
 
         // V4: Box<dyn> works
         checks_passed += 1;
-        details.push("V4: Box<dyn RecipientControlVerifier> works for Ed25519RegistryControlVerifier, RealOrchardIvkControlVerifier, HybridControlVerifier, SettlementUnconfiguredControlVerifier".to_string());
+        details.push("V4: Box<dyn RecipientControlVerifier> works for Ed25519RegistryControlVerifier, SimulatedOrchardIvkControlVerifier, HybridControlVerifier, SettlementUnconfiguredControlVerifier".to_string());
 
         // V4: Why Ed25519 remains MVP documented
         checks_passed += 1;

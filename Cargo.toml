@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/commitments", "crates/credentials", "crates/settlement", "crates/zcash-adapter", "matcher"]
+members = ["crates/protocol", "crates/commitments", "crates/credentials", "crates/settlement", "matcher"]
 resolver = "2"
 
 [workspace.package]
