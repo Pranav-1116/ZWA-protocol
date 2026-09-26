@@ -788,7 +788,7 @@ impl JsonFilePersistence {
                 Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
                 _ => PathBuf::from("."),
             };
-            fs::File::open(&dir)
+            fs::File::open(dir)
                 .and_then(|d| d.sync_all())
                 .map_err(|e| io("fsync dir", e))?;
         }
