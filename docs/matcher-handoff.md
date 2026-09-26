@@ -75,28 +75,34 @@ impl MatcherProofGate {
   pub fn verify_both(&self, issuer_root: &AuthenticatedIssuerRoot, credential_root: &AuthenticatedCredentialRoot, prov_proof, elig_proof) -> Result<(), VerificationResult>
 }
 
-// Task E + A6 — persistent replay
-pub trait ReplayPersistence: Send + Sync { fn save(&self, record: &TradeRecord) -> Result<(), PersistenceError>; fn load(&self, commitment) -> Option<TradeRecord>; fn load_all(&self) -> Vec<TradeRecord>; }
-pub struct InMemoryPersistence { inner: Mutex<BTreeMap> }
-pub struct JsonFilePersistence { path, cache } // versioned {"schema_version":1,"records":[...]}, atomic tmp+rename
-#[cfg(feature="sqlite")] pub struct SqlitePersistence { path, conn } // rusqlite bundled, production-ready
-pub struct RocksDbPersistence; // placeholder fail-closed
-pub struct PersistentReplayStore<P: ReplayPersistence> { inner: Mutex<ReplayStore>, persistence: P }
+// Task E + A6 — persistent replay (remediated F-05/F-06: complete records, fallible load, CAS)
+pub struct ReplayRecord { /* commitment, intent, state, failure_reason, prior_txid, retry_count, version — read-only accessors */ }
+pub trait ReplayPersistence: Send + Sync {
+  fn load(&self, commitment) -> Result<Option<ReplayRecord>, PersistenceError>;
+  fn load_all(&self) -> Result<Vec<ReplayRecord>, PersistenceError>;
+  fn compare_and_swap(&self, expected: Option<&ReplayRecord>, new: &ReplayRecord) -> Result<(), PersistenceError>; // Conflict on lost race
+}
+pub struct InMemoryPersistence;                    // CAS under a mutex; share via Arc
+pub struct JsonFilePersistence;                    // schema v2, strict, re-read per op, fsync tmp+rename, single writer
+#[cfg(feature="sqlite")] pub struct SqlitePersistence; // replay_records_v2, BEGIN IMMEDIATE + conditional UPDATE; multi-instance safe
+pub struct RocksDbPersistence;                     // placeholder, every call fails closed
+pub struct PersistentReplayStore<P: ReplayPersistence> { /* persistence only — no in-memory lifecycle state */ }
 impl<P> PersistentReplayStore<P> {
-  pub fn new(persistence, max_retries) -> Self // loads load_all() and replays to reach state
-  pub fn create_checked(&self, checked: &CheckedTrade) -> Result<TradeRecord, ReplayError> // only via CheckedTrade
-  pub fn verify(&self, commitment, now) -> Result<TradeRecord, ReplayError>
-  pub fn acquire_construction(&self, commitment, now) -> Result<TradeRecord, ReplayError> // compare-and-set, only one winner
-  pub fn submit(&self, commitment, txid, now) -> Result<TradeRecord, ReplayError>
-  pub fn confirm(&self, commitment) -> Result<TradeRecord, ReplayError>
-  pub fn consume(&self, commitment) -> Result<TradeRecord, ReplayError>
-  pub fn state(&self, commitment) -> Option<TradeLifecycleState>
-  pub fn get(&self, commitment) -> Option<TradeRecord>
+  pub fn new(persistence, max_retries) -> Result<Self, ReplayError> // validates every stored record
+  pub(crate) fn create_checked / verify / acquire_construction      // gate-only
+  pub fn submit(&self, commitment, txid, now) -> Result<ReplayRecord, ReplayError>
+  pub fn confirm(&self, commitment) -> Result<ReplayRecord, ReplayError>
+  pub fn consume(&self, commitment) -> Result<ReplayRecord, ReplayError>
+  pub fn fail(&self, commitment, reason) -> Result<ReplayRecord, ReplayError>
+  pub fn expire(&self, commitment, now) -> Result<ReplayRecord, ReplayError>
+  pub fn retry_after_failure(&self, commitment, ack_txid, now) -> Result<ReplayRecord, ReplayError>
+  pub fn state(&self, commitment) -> Result<Option<TradeLifecycleState>, ReplayError>
+  pub fn get(&self, commitment) -> Result<Option<ReplayRecord>, ReplayError>
 }
 
 // Task F + A7 — 10-step gate
-pub struct GateInput { intent, commitment, issuer_envelope, credential_envelope, approved_receiver, control_challenge, control_response, provenance_proof, eligibility_proof, now }
-pub enum GateRejection { CommitmentMismatch, RootAuth(RootAuthError), Control(ControlError), Replay(ReplayError), ExpiredTrade, ProofInvalid(VerificationResult), AlreadyConsumed, AlreadyExpired, IllegalState, ApprovedReceiverMismatch }
+pub struct GateInput { intent, commitment, issuer_envelope, credential_envelope, approved_receiver, recipient_subject_commitment /* F-02 */, control_challenge, control_response, provenance_proof, eligibility_proof, now }
+pub enum GateRejection { CommitmentMismatch, RootAuth(RootAuthError), Control(ControlError), Replay(ReplayError), ExpiredTrade, ProofInvalid(VerificationResult), AlreadyConsumed, AlreadyExpired, RetryRequired, IllegalState, RecipientBindingMismatch }
 #[derive(Debug)] // opaque, !Clone, !Serialize, private _private: ()
 pub struct VerifiedTrade { checked_trade: private, authenticated_issuer_root: private, authenticated_credential_root: private, verified_control: private, _private: () }
 impl VerifiedTrade {
@@ -159,24 +165,23 @@ Vikram should only call `MatcherGate::evaluate()` and handle `GateRejection`. Do
 - VK hash checked: `VkHash::from_json_str(vkey_json)` SHA256 hex, `ProvenanceVerifierBackend::from_fixture()` expects `4831d3eef9575ef7daf318eb8767e1a39ef1e26da20339ddda137b1e246f1350`, `Eligibility` expects `879d427a16f334edc163e78614c94dfe00c3ae3cb657c3ef4d7d82c39e4f5e75`. Prevents substitution (threat model).
 - Public inputs order frozen: provenance `[authorizedIssuanceRoot, tradeCommitment]`, eligibility `[activeCredentialRoot, tradeCommitment]` — 2 public inputs, 21/ private inputs, constraints 8837/13502.
 - Proofs: `tests/fixtures/groth16/provenance-proof.json` + `provenance-public.json` = `[8857867840332676380575934803462643968319857770249975039236308904195120230546, 7409670081847436957289371955571360481923983184454289247710022466448715682310]` (Phase0F), `eligibility-proof.json` + `eligibility-public.json` = `[7721491042898277899686830032817687831050368809629386580479309633507500868506, 10187400613857124614980227259922066295752635539032972479692659299555113110306]` (Phase1B). Real proofs verify in `cargo test -p zwa-matcher --lib verifiers::tests::real_provenance_proof_verifies_with_real_vkey` and `real_eligibility_proof_verifies_with_real_vkey` in both debug and release.
-- Mock fallback: In `#[cfg(test)]` only, `make_test_proof_json(root, commitment)` creates `{"public_inputs":[root, commitment]}` that passes `ProvenanceVerifierBackend::default()` / `EligibilityVerifierBackend::default()` via mock path — never reachable in non-test build. Production must use `from_fixture()` with hash check.
+- No fallback (F-01): malformed or non-Groth16 input always rejects with `ProofMalformed`, in every build and feature combination (`test-helpers` is inert). Tests inject `#[cfg(test)]` trait fakes instead. Production must use `from_fixture()` with hash check.
 
 ## Persistence setup
 
-- Trait `ReplayPersistence: Send + Sync { save, load, load_all, delete }`.
-- `InMemoryPersistence` — `Mutex<BTreeMap<TradeCommitment, TradeRecord>>`, for tests.
-- `JsonFilePersistence` — versioned `{"schema_version":1,"records":[{commitment_decimal,intent,state,...}]}`, atomic write via `path.tmp` + rename, survives restart, `new(path)` loads and replays transitions to reach state. Corrupted JSON returns `Deserialization` without destructive migration, unknown version returns `UnknownSchemaVersion {got, expected}` without overwriting file.
-- `SqlitePersistence` behind `sqlite` feature — `rusqlite 0.31 bundled`, `CREATE TABLE replay(commitment TEXT PRIMARY KEY, data TEXT, schema_version INTEGER)`, checks distinct versions on `new()` and rejects unknown, production-ready alternative to JSON MVP.
-- `RocksDbPersistence` placeholder — fails closed with Io error mentioning RocksDB not configured, satisfies spec listing SQLite/RocksDB while JSON remains MVP.
-- `PersistentReplayStore<P>` — wraps `ReplayStore` in `Mutex<ReplayStore>` + persistence, every successful transition `save()`, `new()` loads `load_all()` into inner via transitions (CREATED→VERIFIED→...), thread-safe compare-and-set for `acquire_construction`.
+- See the API block above. Every transition is `load → apply (mirrors frozen ReplayStore) → compare_and_swap(expected state + version)`; nothing is cached in memory, so a failed write cannot advance state and a lost race returns `Conflict`.
+- Stored data is validated on open and on every load (commitment must recompute from intent, canonical encodings, no unknown fields, version >= 1). Corrupt, legacy (schema 1, bare array, old `replay` SQLite table), empty or unknown-version data fails closed and is never migrated or rewritten.
+- Use `SqlitePersistence` when more than one process or store instance shares state; `JsonFilePersistence` is single-writer.
 - Expiry contract frozen: `verify`, `acquire_construction`, `submit`, `retry_after_failure` expiry-gated (`now > expiry` → Expired), `confirm`/`consume` allowed after expiry if submission was valid. `FAILED → CREATED` requires full re-verification, retry budget 3, txid ack exact.
 
 ## Integration & release audit (A8)
 
-- One complete valid flow test `gate::tests::gate_allows_valid_private_trade` — real Ed25519 signatures for issuer (seed 1) + credential (seed 2) + control (seed 3), `RecipientControlChallenge` with trade_commitment binding, `JsonFilePersistence` or `InMemoryPersistence`, `make_test_proof_json` mock proofs for same commitment (real Groth16 path tested separately in `verifiers::tests`).
-- Every attack scenario blocks at intended gate — 7 gate tests cover unauthorized asset (CommitmentMismatch at Step 2), wrong investor class (ProofInvalid at Step 8), receiver not approved (ApprovedReceiverMismatch at Step 5), approved without control (SignatureVerificationFailed at Step 5), expired trade (ExpiredTrade at Step 6), stale root (VersionNotCurrent at Step 3), proof splicing (ProofInvalid at Step 7/8), double construction (IllegalState at Step 9), identical request twice (IllegalState).
-- Debug ↔ release parity — `cargo test --workspace` and `cargo test --workspace --release` must both pass 82 frozen + 38 matcher = 120 tests. Paste 1.0.15 unmaintained warning via arkworks/light-poseidon is not vulnerability.
-- Final audit goal SAFE (0 Critical, 0 High, 0 Medium) — ZWA-REL-001 fixed via CheckedTrade, no unsafe, no unwrap in non-test (clippy deny), typed errors, distinct newtypes, redacted secrets.
+**Status: NOT ACCEPTED — pending independent re-audit after M2 remediation (F-01, F-02, F-05/F-06, F-07).**
+
+- Gate happy-path tests use real Ed25519 roots and control with `#[cfg(test)]` injected proof fakes for the same commitment; the real Groth16 path is tested in `verifiers::tests` and with the real eligibility verifier in `gate::tests::f02_*`. No end-to-end ALLOW with two real proofs exists: the fixture proofs are for different trades (`7409…` vs `10187…`).
+- Gate order: CheckedTrade → read-only replay precheck → trade expiry → roots → recipient binding + control → provenance → eligibility → create/VERIFIED/SETTLEMENT_CONSTRUCTED (CAS). No replay write happens before all checks pass.
+- `FAILED` is never retried by the gate (`RetryRequired`); the settlement side must call `retry_after_failure` with the exact prior txid, after which the trade must pass the full gate again.
+- Breaking changes for the settlement side (M4, not modified here): `PersistentReplayStore::new` returns `Result`; `state/get` return `Result<Option<_>>` and `ReplayRecord` instead of `TradeRecord`; `create_checked/verify/acquire_construction` are crate-private; `ReplayPersistence` trait changed; `GateInput.recipient_subject_commitment` added; `RocksDbPersistence` fails closed.
 
 ## For Vikram — what to call
 
@@ -187,10 +192,10 @@ let gate = MatcherGate::new(
   RecipientControlAuthenticator::new(approved_control_keys, CONTROL_DOMAIN.to_vec()),
   ProvenanceVerifierBackend::from_fixture()?,
   EligibilityVerifierBackend::from_fixture()?,
-  PersistentReplayStore::new(JsonFilePersistence::new(path)?, 3),
+  PersistentReplayStore::new(JsonFilePersistence::new(path)?, 3)?,
 );
 
-let input = GateInput { intent, commitment, issuer_envelope, credential_envelope, approved_receiver, control_challenge, control_response, provenance_proof, eligibility_proof, now };
+let input = GateInput { intent, commitment, issuer_envelope, credential_envelope, approved_receiver, recipient_subject_commitment, control_challenge, control_response, provenance_proof, eligibility_proof, now };
 
 match gate.evaluate(input) {
   Ok(approval) => { /* approval.commitment(), approval.intent() → hand to Phase 3 settlement adapter */ },

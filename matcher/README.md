@@ -137,86 +137,58 @@ Enforces:
 
 Tests: valid control pass, approved without control BLOCK (`ControlKeyNotApproved`), same credential different receiver FAIL (`ReceiverMismatch`, `ApprovedReceiverMismatch`), expiry/nonce/domain/sig enforcement, canonical bytes include all fields.
 
-## Task D — Concrete Groth16 Verifier Backends (Same-Commitment Invariant) — IMPLEMENTED
+## Task D — Groth16 Verifier Backends (Same-Commitment Invariant) — REMEDIATED (F-01)
 
-Phase 1 defined `ProvenanceVerifier` and `EligibilityVerifier` traits with `#[must_use] VerificationResult` but no backend. Task D wires concrete backends that use exact same checked commitment from `CheckedTrade` for both verifiers, preventing proof splicing (Sec 14, 23).
-
-Groth16 vkeys are not tracked in repo per `circuits/README.md` (generated artifacts must stay outside). For MVP, backend verifies `OpaqueProof` JSON public inputs:
-
-```json
-{ "public_inputs": ["<root decimal>", "<tradeCommitment decimal>"], "proof": { "a":..., "b":..., "c":... } }
-```
+`ProvenanceVerifierBackend` / `EligibilityVerifierBackend` verify real Groth16 (BN254, `ark-groth16`) against pinned verification keys (SHA-256 identity check in `from_fixture()`), with public inputs `[root, tradeCommitment]` taken from the authenticated root and `CheckedTrade::commitment()`.
 
 ```rust
-use zwa_matcher::{ProvenanceVerifierBackend, EligibilityVerifierBackend, MatcherProofGate, make_test_proof_json};
-use zwa_protocol::proof::{ProvenanceVerifier, EligibilityVerifier};
+use zwa_matcher::{ProvenanceVerifierBackend, EligibilityVerifierBackend, MatcherProofGate};
 
-let prov_v = ProvenanceVerifierBackend::new("provenance-v1");
-let elig_v = EligibilityVerifierBackend::new("eligibility-v1");
-
+let prov_v = ProvenanceVerifierBackend::from_fixture()?;   // VK hash pinned
+let elig_v = EligibilityVerifierBackend::from_fixture()?;
 let gate = MatcherProofGate::new(checked_trade, prov_v, elig_v);
 gate.verify_both(&auth_issuer_root, &auth_credential_root, &provenance_proof, &eligibility_proof)?;
 ```
 
 Enforces:
-- Provenance: public `[authorizedIssuanceRoot, tradeCommitment]` must match supplied root + `checked_trade.commitment()`
-- Eligibility: public `[activeCredentialRoot, tradeCommitment]` must match same commitment
-- `ProofMalformed` if not JSON or missing `public_inputs`
-- `PublicInputMismatch` if spliced from different trade (Sec 23 threat)
-- `ProofRejected` if proof field == "invalid"
-- `MatcherProofGate` holds `CheckedTrade` and passes its commitment to both verifiers — type-level same-commitment invariant, fix for splicing attack
+- Malformed or non-Groth16 input **always** rejects (`ProofMalformed`). There is no JSON/"public_inputs" fallback in any build or feature combination; `--all-features` enables no bypass. The `test-helpers` feature is inert (kept only so dependants' manifests resolve) and a source-scan test asserts no bypass symbol or `cfg(feature = "test-helpers")` exists.
+- `PublicInputMismatch` if the proof's public signals are for another root or commitment (splicing).
+- `ProofRejected` if the pairing check fails. Unconfigured backends fail closed.
+- Test doubles are `#[cfg(test)]` only and injected through the `ProvenanceVerifier`/`EligibilityVerifier` traits (`gate::tests::FakeVerifier`).
 
-Tests: valid accept, spliced commitment `10187...` vs `7409...` → `PublicInputMismatch`, wrong root → mismatch, malformed/invalid → `ProofMalformed`/`ProofRejected`, gate enforces same commitment for both, `must_use` meaningful.
+Regression tests (F-01): old fake JSON `{"public_inputs":[root,commitment]}` rejected by both backends, malformed bytes, wrong commitment, wrong root, real fixture proofs verify.
 
-Production can replace JSON parsing with `ark_groth16::verify_proof(vk, proof, &[root, commitment])` keeping same gate interface.
+## Task E — Persistent Replay Coordination — REMEDIATED (F-05 / F-06)
 
-## Task E — Persistent Replay Coordination (Canonical State Machine) — IMPLEMENTED
+Frozen `ReplayStore` is an in-memory model whose `TradeRecord` has private fields and no restore API. The matcher therefore never reconstructs `TradeRecord`s (the old code replayed transitions with hardcoded timestamps, a fake txid, a forced failure reason and a reset retry count). Instead:
 
-Frozen `ReplayStore` is in-memory model only. Task E wraps it with pluggable persistence that survives restart, preserving canonical lifecycle.
-
-Lifecycle (Sec 16, frozen):
-```
-CREATED → VERIFIED → SETTLEMENT_CONSTRUCTED → SUBMITTED → CONFIRMED → CONSUMED
-FAILED → CREATED → VERIFIED (085efe0 fix, requires re-verification)
-EXPIRED, CONSUMED terminal
-Expiry: verify, acquire_construction, submit, retry expiry-gated; confirm/consume allowed after expiry if submission valid
-```
-
-Implementation `matcher/src/replay.rs`:
+- `ReplayRecord` (M2-owned) holds every frozen field — commitment, intent, state, failure reason, prior txid, retry count — plus a CAS `version`, and is persisted **as is**.
+- `replay::apply` is a pure transition function that mirrors frozen `ReplayStore` exactly (incl. "move to `EXPIRED`, then reject"). A differential test drives both through every operation sequence to depth 7 and requires identical results.
+- `PersistentReplayStore<P>` keeps **no** lifecycle state in memory. Each transition is: fallible `load` → `apply` → `compare_and_swap(expected state + version)`. A failed or lost write leaves the durable record unchanged and returns an error; there is nothing in memory that could run ahead.
 
 ```rust
 pub trait ReplayPersistence: Send + Sync {
-  fn save(&self, record: &TradeRecord) -> Result<(), PersistenceError>;
-  fn load(&self, commitment) -> Option<TradeRecord>;
-  fn load_all(&self) -> Vec<TradeRecord>;
-}
-
-pub struct InMemoryPersistence { inner: Mutex<BTreeMap<TradeCommitment, TradeRecord>> }
-pub struct JsonFilePersistence { path: PathBuf, cache: Mutex<BTreeMap<...>> } // JSON array of PersistedRecord, atomic write via tmp+rename
-
-pub struct PersistentReplayStore<P: ReplayPersistence> {
-  inner: Mutex<ReplayStore>,
-  persistence: P,
-}
-impl<P> PersistentReplayStore<P> {
-  pub fn new(persistence: P, max_retries: u32) -> Self // loads all from persistence
-  pub fn create_checked(&self, checked: &CheckedTrade) -> Result<TradeRecord, ReplayError> // only via CheckedTrade, fixes ZWA-REL-001
-  pub fn verify(), acquire_construction(), submit(), confirm(), consume(), fail(), expire(), retry_after_failure()
+  fn load(&self, c: TradeCommitment) -> Result<Option<ReplayRecord>, PersistenceError>;
+  fn load_all(&self) -> Result<Vec<ReplayRecord>, PersistenceError>;
+  // expected None: insert if absent; Some(e): replace only if stored state+version == e's
+  fn compare_and_swap(&self, expected: Option<&ReplayRecord>, new: &ReplayRecord)
+      -> Result<(), PersistenceError>; // PersistenceError::Conflict on a lost race
 }
 ```
 
-Enforces:
-- `create` only via `CheckedTrade` (Task A)
-- Compare-and-set: `acquire_construction` succeeds once for `VERIFIED`
-- Expiry gates re-checked at verify/acquire/submit/retry, not at confirm/consume (frozen contract)
-- `FAILED → CREATED` requires full re-verification + txid ack + retry budget (DEFAULT 3)
-- Every successful transition calls `persistence.save()`
-- Recovery: `new()` loads `load_all()` and replays to reach persisted state (CREATED→VERIFIED→...→CONSUMED)
-- Thread-safe via `Mutex<ReplayStore>`, `PersistenceError` typed
+Backends:
+- `InMemoryPersistence` — mutex-guarded map, CAS under the lock (share via `Arc` across stores).
+- `JsonFilePersistence` — schema v2, strict decoding (`deny_unknown_fields`, explicit state/failure tags, canonical txid hex, commitment must recompute from intent), re-read on every operation, write via fsync'd tmp + rename. Single-writer: two processes on one file are not supported (use SQLite).
+- `SqlitePersistence` (`sqlite` feature) — table `replay_records_v2`, `BEGIN IMMEDIATE`, conditional `UPDATE … WHERE state = ? AND version = ?` / `INSERT OR IGNORE`, `synchronous=FULL`. Safe for several store instances/processes on one DB file.
+- `RocksDbPersistence` — placeholder; every call fails closed (`NotConfigured`).
 
-Tests: creates/persists via checked only, expiry gate moves to EXPIRED, only one acquirer, retry requires ack + reverification, recovery from in-memory, JSON file survives restart (temp file), CONSUMED/EXPIRED terminal.
+Corrupt, tampered, legacy (v1 / bare array / old SQLite table), empty or unknown-version data is rejected at open/load — never silently skipped, migrated or rewritten.
 
-## Task F / A7 — 10-Step Deterministic Allow/Block Gate (A+B+C+D+E Combined) — IMPLEMENTED ✅ COMPLETE
+API: `PersistentReplayStore::new(p, max_retries) -> Result<Self, ReplayError>` (validates all stored records); `state()`/`get()` return `Result<Option<_>>`. `create_checked`, `verify`, `acquire_construction` are `pub(crate)`: only `MatcherGate::evaluate` can create, verify and lock a trade. `submit`, `confirm`, `consume`, `fail`, `expire`, `retry_after_failure(ack_txid, now)` remain public for the settlement side.
+
+Tests: exact restart round-trip (JSON; SQLite) of retry count, txids, failure reason, expiry; injected persistence failure does not advance state; concurrent CAS has exactly one winner (shared in-memory, two SQLite connections to one DB); stale CAS rejected on every backend; corrupt/legacy/tampered data fails closed.
+
+## Task F / A7 — Deterministic Allow/Block Gate (A+B+C+D+E Combined)
 
 Combines all previous tasks into single deterministic **fail-closed** gate per handbook Sec 15, 28. Cheap checks before expensive proofs.
 
@@ -226,11 +198,11 @@ Combines all previous tasks into single deterministic **fail-closed** gate per h
 2. Verify intent/commitment correspondence → `CheckedTrade` (Task A / A1, ZWA-REL-001) — `ReplayStore::create` stores without recomputing. Prevents intent substitution (10 fields: offered asset, requested asset, both amounts, recipient, policy, fee amount, fee recipient, nonce, expiry) + expiry bypass. Output opaque witness, only via `verify_trade_commitment`.
 3. Authenticate issuer + credential root signatures vs approved keyset (Task B / A3, Ed25519 over frozen `"ZWA1ROOT"` payload) — roots are public inputs to circuits, authenticity not in circuits. Prevents forged/stale issuer/credential root, wrong authority, malleability.
 4. Require current version, freshness, `trade_expiry ≤ root_expiry`, combined `trade_expiry ≤ min(issuer, credential)` (Task B) — version 0 invalid, only current version accepted (supersession, stale-but-signed rejected), `window.contains(now)` inclusive, trade must not outlive roots. Prevents stale/superseded replay, not-yet-valid, trade beyond root, revocation latency. Output `AuthenticatedIssuerRoot`, `AuthenticatedCredentialRoot` private envelope, cannot be fabricated.
-5. Verify live wallet control of authority-approved receiver (Task C / A5) — Phase1B binds authority-approved receiver into credential leaf `credential(A)+trade(A) PASS, credential(A)+trade(B) FAIL`. Live control proves current control. Domain `ZWA-RECIPIENT-CTRL-V1`, nonce[32] fresh, issued_at/expiry, receiver 43B, trade_commitment 32B in canonical `domain||nonce||issued_at BE||expiry BE||receiver||trade_commitment`. Prevents credential secret lending, approved A without control, challenge replay across domains/times/receivers/trades, expired reuse. Output `VerifiedRecipientControl` with `H(RECEIVR1, limbs)`.
-6. Verify trade expiry + replay state permit verification (Task E / A6) — frozen `now > expiry` (now==expiry valid), expiry re-checked at verify/acquire/submit/retry, not confirm/consume, `FAILED → CREATED → full re-verification` (085efe0), `CONSUMED`/`EXPIRED` terminal. Prevents replay after settlement, stale verification, construction after expiry, double construction (compare-and-set, only one winner), retry budget exhaustion. Output persistent `CREATED → VERIFIED` via `PersistentReplayStore`.
-7. Verify provenance proof vs `authorizedIssuanceRoot` + checked commitment (Task D / A4) — Merkle depth 3, public inputs `[root, commitment]` frozen. Prevents fake RWA, wrong root, amount/fee/recipient substitution via commitment binding, malformed/rejected. Uses exact `checked_trade.commitment()` from Task A — no re-derivation.
-8. Verify eligibility Phase1B proof vs `activeCredentialRoot` + same commitment (Task D / A4) — private credential + policy + approved receiver, range checks 8b/16b/64b/64b, single receiverHasher reused twice. Prevents wrong class/jurisdiction, borrowed credential, credential A + trade B, proof splicing (same commitment invariant via `MatcherProofGate`), VK substitution via hash check. Output both proofs verified against same `TradeCommitmentV1`.
-9. Acquire settlement construction only after 1-8 succeed (Task E compare-and-set) — expensive atomic ZSA settlement only after cheap gates. Prevents two workers constructing same commitment, construction after expiry, construction without verification.
+5. Bind the approved receiver to the trade (F-02), then verify live wallet control (Task C / A5). The raw `approved_receiver` is caller-supplied, so the gate recomputes `H(RCPBIND1, recipient_subject_commitment, H(RECEIVR1, approved_receiver))` (frozen `zwa-commitments`) and requires it to equal `intent.recipient_commitment` (`RecipientBindingMismatch` otherwise). Phase1B eligibility binds the same recipient commitment to the credential leaf's receiver; control is verified for exactly `approved_receiver`. Result: trade, credential and controlled wallet name one receiver — proof for A + control of B rejects.
+6. Verify provenance proof vs `authorizedIssuanceRoot` + checked commitment (Task D / A4).
+7. Verify eligibility Phase1B proof vs `activeCredentialRoot` + same commitment (Task D / A4).
+8. Only now write replay state (F-07): create if absent → `VERIFIED` → `SETTLEMENT_CONSTRUCTED`, each a CAS. Before any root/proof work a read-only precheck admits only none/`CREATED`/`VERIFIED`: `FAILED` → `RetryRequired` (explicit `retry_after_failure` with exact txid ack, then full re-verification), `CONSUMED`/`EXPIRED` terminal, active settlement states are replays. Trade expiry (`now > expiry`; `now == expiry` valid) is checked right after the precheck; an existing `CREATED`/`VERIFIED` record becomes `EXPIRED`, none is created. Any failed check leaves replay state untouched.
+9. (merged into 8) The construction lock is the final CAS; exactly one concurrent caller wins.
 10. Return `VerifiedTrade` / `MatcherApproval` to settlement adapter — opaque, non-serializable, only via `evaluate()`. Proves all 9 gates passed. Does NOT prove non-custodial settlement (Phase 3), wallet spending-key beyond control challenge, global compliance enforcement, production ZSA mainnet, recursive lineage.
 
 **Output A7: MatcherApproval opaque non-serializable**
@@ -266,10 +238,11 @@ let gate = MatcherGate::new(
   issuer_auth, credential_auth, control_auth,
   ProvenanceVerifierBackend::from_fixture()?, // real Groth16 with VK hash check
   EligibilityVerifierBackend::from_fixture()?,
-  PersistentReplayStore::new(JsonFilePersistence::new(path)?, 3)
+  PersistentReplayStore::new(JsonFilePersistence::new(path)?, 3)?,
 );
 
-let input = GateInput { intent, commitment, issuer_envelope, credential_envelope, approved_receiver, control_challenge, control_response, provenance_proof, eligibility_proof, now };
+let input = GateInput { intent, commitment, issuer_envelope, credential_envelope, approved_receiver,
+  recipient_subject_commitment, control_challenge, control_response, provenance_proof, eligibility_proof, now };
 
 match gate.evaluate(input) {
   Ok(approval) => { /* approval.commitment(), approval.intent() → Phase 3 */ },
@@ -283,7 +256,7 @@ match gate.evaluate(input) {
 }
 ```
 
-**Typed Rejections:** `CommitmentMismatch`, `RootAuth(RootAuthError)`, `Control(ControlError)`, `Replay(ReplayError)`, `ExpiredTrade`, `ProofInvalid(VerificationResult)`, `AlreadyConsumed`, `AlreadyExpired`, `IllegalState`, `ApprovedReceiverMismatch`
+**Typed Rejections:** `CommitmentMismatch`, `RootAuth(RootAuthError)`, `Control(ControlError)`, `Replay(ReplayError)`, `ExpiredTrade`, `ProofInvalid(VerificationResult)`, `AlreadyConsumed`, `AlreadyExpired`, `RetryRequired`, `IllegalState`, `RecipientBindingMismatch`
 
 **Tests A7 (13 for gate, total matcher 38+5=43 tests):**
 - `gate_allows_valid_private_trade` — happy ALLOW → `MatcherApproval`, state `SETTLEMENT_CONSTRUCTED`
@@ -297,26 +270,39 @@ match gate.evaluate(input) {
 - `gate_blocks_expired_trade_and_stale_root` — now after expiry → ExpiredTrade, version 2 vs current 1 → VersionNotCurrent at Step 3
 - `gate_blocks_proof_splicing_from_different_trades` — eligibility different commitment → ProofInvalid at Step 8 (same-commitment invariant)
 - `gate_acquires_construction_only_after_all_gates_pass` — before None, after `SETTLEMENT_CONSTRUCTED`, second → IllegalState (compare-and-set)
-- `a8_integration_real_signatures_real_control_persistent_replay_mock_proofs` — real Ed25519 issuer+credential+control, `JsonFilePersistence` file survives close/reopen, versioned `schema_version`, state `SETTLEMENT_CONSTRUCTED` recovered
+- `a8_integration_real_signatures_real_control_persistent_replay_injected_fake_proofs` — real Ed25519 issuer+credential+control, `JsonFilePersistence` file survives close/reopen, versioned `schema_version`, state `SETTLEMENT_CONSTRUCTED` recovered
 - `a8_integration_real_groth16_proofs_individually_verify` — real Groth16 `provenance-proof.json` + `eligibility-proof.json` verify with VK hash `4831d3...` and `879d42...`
+- F-02 (`f02_*`): proof/credential for receiver A + control of B rejects; A/A passes; wrong raw receiver and wrong recipient commitment reject; trade bound to B with a real proof for A rejects.
+- F-07 (`f07_*`): persisted state and verifier call counts after invalid provenance, invalid eligibility, failed control, every root failure (wrong signer, expired, not-yet-valid, superseded, expiring before trade), expired trade with/without record, `now == expiry`, FAILED → explicit retry → CREATED → full re-verification, VERIFIED re-verified before lock, replay attempt, concurrent identical requests (one approval).
 
 **Security:** No fork of commitment logic, byte encodings, root serialization, or replay semantics. Same-commitment invariant via `CheckedTrade` + `MatcherProofGate`. Stale-but-signed rejected, trade expiry ≤ min root expiry, live control separate from approval, replay terminal states, opaque non-cloneable approval.
 
 Compliance is matcher-enforced. ZSA settlement is experimental QEDIT stack, not production mainnet. See `docs/architecture.md` Sec 15, `docs/trade-commitment-v1.md`, decisions `0002`, `0004`, `0005`, handoff `docs/matcher-handoff.md`.
 
-## Task A8 — Integration & Release Audit — IMPLEMENTED ✅ COMPLETE
+## Task A8 — Integration & Release Audit — NOT ACCEPTED (pending independent re-audit)
+
+> **M2 remediation status.** Findings F-01, F-02, F-05/F-06 and F-07 were fixed on
+> this branch (see sections above). Acceptance of A8 is for the independent
+> re-auditor, not the implementer. Open items: (1) there is no end-to-end ALLOW
+> with *real* Groth16 proofs, because the fixture proofs are for two different
+> trades (provenance `7409…`, eligibility `10187…`) and regenerating proofs is
+> out of M2 scope; (2) frozen circuits were modified in `ef7fc73` (`dummyProd`
+> constraint + regenerated VKs) and could not be reverted without an M1 frozen
+> VK to return to; (3) the replay/gate API change breaks `crates/settlement`
+> (M4) until its owner adapts it. Statements below that predate the
+> remediation are historical.
 
 **One complete valid flow: real signatures, real proofs, real recipient control, persistent replay → MatcherApproval**
 
 - Real Ed25519 signatures: issuer seed `[1;32]` pubkey `8a88e3dd...` sig `66b6a1...`, credential seed `[2;32]` pubkey `8139770e...` sig `023c63...` over frozen `ZWA1ROOT` canonical bytes — same file `tests/fixtures/root-sig-golden-vectors.json` verified in Rust `ed25519_dalek` + JS `tweetnacl` (`node scripts/verify-root-sigs.js`, `node --test tests/adversarial/root-signature.test.js`)
 - Real recipient control: Ed25519 control key seed `[3;32]` registered for receiver `781671f8...be233`, challenge `domain||nonce||issued_at BE||expiry BE||receiver 43B||trade_commitment 32B` signed, verified via `RecipientControlAuthenticator`
-- Persistent replay: `JsonFilePersistence` versioned `{"schema_version":1,"records":[...]}` atomic tmp+rename, `SqlitePersistence` behind `sqlite` feature with `rusqlite bundled`, `RocksDbPersistence` placeholder fail-closed. Test `a8_integration_real_signatures_real_control_persistent_replay_mock_proofs` creates file, evaluates → `SETTLEMENT_CONSTRUCTED`, file exists with `schema_version`, drop + reopen recovers same state.
+- Persistent replay: `JsonFilePersistence` versioned `{"schema_version":2,"records":[...]}` (complete records + CAS version) fsync'd tmp+rename, `SqlitePersistence` behind `sqlite` feature with `rusqlite bundled`, `RocksDbPersistence` placeholder fail-closed. Test `a8_integration_real_signatures_real_control_persistent_replay_injected_fake_proofs` creates file, evaluates → `SETTLEMENT_CONSTRUCTED`, file exists with `schema_version`, drop + reopen recovers same state.
 - Real Groth16 proofs: `tests/fixtures/groth16/provenance-vkey.json` hash `4831d3eef9575ef7daf318eb8767e1a39ef1e26da20339ddda137b1e246f1350`, `eligibility-vkey.json` hash `879d427a16f334edc163e78614c94dfe00c3ae3cb657c3ef4d7d82c39e4f5e75`, `provenance-proof.json` public `[8857867840332676380575934803462643968319857770249975039236308904195120230546, 7409670081847436957289371955571360481923983184454289247710022466448715682310]` (Phase0F), `eligibility-proof.json` public `[7721491042898277899686830032817687831050368809629386580479309633507500868506, 10187400613857124614980227259922066295752635539032972479692659299555113110306]` (Phase1B) — both verify via `ark-groth16` in `verifiers::tests::real_provenance_proof_verifies_with_real_vkey` and `real_eligibility_proof_verifies_with_real_vkey` in debug and release (VK hash prevents substitution).
-- Same-commitment invariant: fixtures have different commitments (7409... vs 10187...), so combined gate with both real proofs for same commitment would correctly fail `PublicInputMismatch` (splicing prevention). Integration uses mock proofs for same commitment `make_test_proof_json` for gate happy path, real crypto path exercised in verifiers tests. Documented in `docs/matcher-handoff.md`.
+- Same-commitment invariant: fixtures have different commitments (7409... vs 10187...), so combined gate with both real proofs for same commitment would correctly fail `PublicInputMismatch` (splicing prevention). Gate happy-path tests inject `#[cfg(test)]` trait fakes (`FakeVerifier`) for the same commitment; the real Groth16 path is exercised in verifiers tests and in a gate test with the real eligibility verifier. No production code path accepts fake proofs. Documented in `docs/matcher-handoff.md`.
 - Every attack scenario blocks at intended gate: 13 gate tests + 10 roots + 10 control + 6 verifiers + 13 replay = 43 matcher tests cover CommitmentMismatch at Step 2, VersionNotCurrent/TradeExpiryBeyondRootExpiry at Step 3/4, ApprovedReceiverMismatch/SignatureVerificationFailed at Step 5, ExpiredTrade/AlreadyConsumed/IllegalState at Step 6/9, ProofInvalid/PublicInputMismatch at Step 7/8.
 - Debug ↔ release parity: `cargo test --workspace` and `cargo test --workspace --release` must pass 82 frozen + 43 matcher = 125 tests. `paste 1.0.15` unmaintained warning via arkworks/light-poseidon is not vulnerability. Sandbox has no cargo, CI will run.
 - Handoff docs for Vikram: `docs/matcher-handoff.md` — exact public API (what can he call, what errors), what `MatcherApproval` proves and does NOT prove (not non-custodial, not wallet spending-key, not global compliance, not production ZSA mainnet, not recursive lineage), root configuration (Ed25519 ADR, golden vectors, approved keys, current version, freshness, combined expiry), verifier VK identity (SHA256 hash check), persistence setup (JSON versioned, SQLite feature, RocksDB placeholder).
-- Audit gates: `cargo fmt --check`, `clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` PASS, `cargo audit` 0 vulnerabilities, final audit SAFE (0 Critical, 0 High, 0 Medium) — ZWA-REL-001 fixed via `CheckedTrade`, no unsafe, no unwrap in non-test, typed errors, distinct newtypes, redacted secrets, opaque `MatcherApproval`.
+- Audit gates (historical, pre-remediation; superseded by findings F-01…F-07): `cargo fmt --check`, `clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` — ZWA-REL-001 fixed via `CheckedTrade`, no unsafe, no unwrap in non-test, typed errors, distinct newtypes, redacted secrets, opaque `MatcherApproval`.
 
 **Deliverables for Vikram:**
 
@@ -328,15 +314,15 @@ Compliance is matcher-enforced. ZSA settlement is experimental QEDIT stack, not 
 - `docs/matcher-handoff.md` (public API, proves/does NOT prove, root config, VK identity, persistence)
 - `docs/decisions/0005-root-signature-scheme.md` already documents why Ed25519
 
-Ready for independent audit and manual push per AGENTS.md.
+Ready for independent re-audit once `cargo fmt --check`, `cargo clippy -p zwa-matcher --all-targets --all-features -- -D warnings` and `cargo test -p zwa-matcher --all-features` pass locally. Not accepted.
 
 ## Build
 
 ```sh
-cargo test -p zwa-matcher                    # 43 tests (A1-A8)
+cargo test -p zwa-matcher --all-features     # includes SQLite persistence tests
 cargo test -p zwa-matcher --lib verifiers::tests::real_provenance_proof_verifies_with_real_vkey -- --nocapture
 cargo test -p zwa-matcher --lib verifiers::tests::real_eligibility_proof_verifies_with_real_vkey -- --nocapture
-cargo clippy -p zwa-matcher -- -D warnings
+cargo clippy -p zwa-matcher --all-targets --all-features -- -D warnings
 cargo fmt --check
 cargo test --workspace                       # 82 frozen + 43 matcher = 125
 cargo test --workspace --release             # debug ↔ release parity
