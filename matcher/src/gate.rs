@@ -58,7 +58,7 @@ use zwa_credentials::{CredentialRootEnvelope, IssuerRootEnvelope};
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;
 use zwa_protocol::proof::{EligibilityVerifier, OpaqueProof, ProvenanceVerifier, VerificationResult};
-use zwa_protocol::{TradeCommitment, TradeIntent};
+use zwa_protocol::{SubjectCommitment, TradeCommitment, TradeIntent};
 
 use crate::checked::CheckedTrade;
 use crate::control::{ControlError, RecipientControlAuthenticator, RecipientControlChallenge, RecipientControlResponse, VerifiedRecipientControl};
@@ -101,6 +101,13 @@ pub enum GateRejection {
 
     #[error("trade in illegal state for verification: {state:?}")]
     IllegalState { state: String },
+
+    /// F-02: `H(RCPBIND1, subject, H(RECEIVR1, approved_receiver))` does not
+    /// equal the trade's `recipient_commitment`, so the receiver whose control
+    /// was presented is not the receiver the trade (and therefore the
+    /// eligibility credential) is bound to.
+    #[error("recipient binding mismatch: approved receiver is not the trade's committed recipient")]
+    RecipientBindingMismatch,
 
     #[error("approved receiver mismatch: expected {expected:?}, got {got:?}")]
     ApprovedReceiverMismatch {
@@ -199,8 +206,21 @@ pub struct GateInput {
     pub issuer_envelope: IssuerRootEnvelope,
     /// Credential root envelope (signed).
     pub credential_envelope: CredentialRootEnvelope,
-    /// Authority-approved receiver from credential leaf (Phase 1B).
+    /// Raw 43-byte Orchard receiver the trader claims the authority approved.
+    ///
+    /// Untrusted on its own. The gate accepts it only if, together with
+    /// `recipient_subject_commitment`, it re-derives the trade's
+    /// `recipient_commitment` (F-02); see [`MatcherGate::evaluate`].
     pub approved_receiver: OrchardReceiverBytes,
+    /// Phase 0G opening of `intent.recipient_commitment`: the credential
+    /// subject commitment `H(SUBJECT1, subjectSecret)`.
+    ///
+    /// Needed because the frozen recipient commitment is
+    /// `H(RCPBIND1, SubjectCommitment, ReceiverCommitment)`; the matcher cannot
+    /// tie a raw receiver to it without this value. It is a hash of the secret,
+    /// never the secret itself. Privacy note: it is stable per credential
+    /// subject, so a matcher can link trades of the same subject.
+    pub recipient_subject_commitment: SubjectCommitment,
     /// Control challenge issued by matcher.
     pub control_challenge: RecipientControlChallenge,
     /// Control response from wallet.
@@ -337,15 +357,41 @@ where
         )
         .map_err(GateRejection::RootAuth)?;
 
-        // Step 5: Live wallet control of authority-approved receiver
-        // 5a: Trade expiry vs challenge expiry
+        // Step 5 (F-02): bind the raw approved receiver to the trade.
+        //
+        // Chain established here, using only frozen M1 functions:
+        //   (1) intent.recipient_commitment
+        //         == H(RCPBIND1, subject, H(RECEIVR1, approved_receiver))   [this check]
+        //   (2) the eligibility proof (Phase1B, verified in step 7 against the
+        //       same checked trade commitment) proves the credential leaf's
+        //       receiver commitment R_c and subject S satisfy
+        //         intent.recipient_commitment == H(RCPBIND1, S, R_c)
+        //   (3) control is verified below for exactly `approved_receiver`
+        //       (challenge.receiver == response.receiver == approved_receiver).
+        // By Poseidon collision resistance, (1)+(2) give
+        //   H(RECEIVR1, approved_receiver) == R_c,
+        // so the receiver whose control succeeds is the credential-approved
+        // receiver committed in the trade. A proof for receiver A combined
+        // with control of receiver B therefore cannot pass.
+        let approved_receiver_commitment =
+            zwa_commitments::receiver_commitment(&input.approved_receiver);
+        let derived_recipient = zwa_commitments::recipient_commitment(
+            input.recipient_subject_commitment,
+            approved_receiver_commitment,
+        );
+        if derived_recipient != checked_trade.intent().recipient_commitment {
+            return Err(GateRejection::RecipientBindingMismatch);
+        }
+
+        // Step 5b: Live wallet control of that exact receiver
+        // Trade expiry vs challenge expiry
         RecipientControlAuthenticator::check_trade_expiry(
             checked_trade.intent().expiry,
             &input.control_challenge,
         )
         .map_err(GateRejection::Control)?;
 
-        // 5b: Trade commitment binding — challenge must be bound to this trade
+        // Challenge must be bound to this trade commitment
         RecipientControlAuthenticator::check_trade_commitment(
             checked_trade.commitment(),
             &input.control_challenge,
@@ -361,6 +407,12 @@ where
                 input.now,
             )
             .map_err(GateRejection::Control)?;
+
+        // Defence in depth: the verified control must be for the very receiver
+        // commitment that was just bound to the trade.
+        if verified_control.receiver_commitment() != approved_receiver_commitment {
+            return Err(GateRejection::RecipientBindingMismatch);
+        }
 
         // Step 6b: Replay state — create or recover, then verify
         // Enforces canonical lifecycle, terminal CONSUMED/EXPIRED, retry budget
@@ -496,6 +548,31 @@ mod tests {
         "781671f8a41294c866d8161f3bf5f84a8fd2c328f91a2d085a66036acd59439731c36c4f1b99b4d64be233";
     const RECEIVER_B_HEX: &str =
         "ba5a9b6828e14d720cc41e998917f5996635d1a7fa84448cb118f7b6f65068d380099e5cd54d98dd3917bb";
+    /// Phase 0G `credential.subjectCommitment` = H(SUBJECT1, 77112233445566778899).
+    const SUBJECT_COMMITMENT: &str =
+        "8182499163832458428983635402341439692935005683808059285091898351261831993662";
+    const SUBJECT_SECRET: &str = "77112233445566778899";
+    /// Phase 0G `syntheticAlternativeSubjectSecret`.
+    const OTHER_SUBJECT_SECRET: &str = "99887766554433221100";
+    /// Phase 0G `trade.recipientCommitment` (receiver A).
+    const RECIPIENT_COMMITMENT_A: &str =
+        "13135279047718387126053226034283670929172341955108098732820235388025453726181";
+    /// Phase 0G `tradeB.recipientCommitment` (receiver B, nonce 7002).
+    const RECIPIENT_COMMITMENT_B: &str =
+        "17161176809258390276335905180845953262038546658189533444510056676908192247925";
+    const TRADE_B_COMMITMENT: &str =
+        "4141140993944283635059564795814979270169431233615041812756992202222578526061";
+    /// Real eligibility fixture public input `activeCredentialRoot`.
+    const REAL_CREDENTIAL_ROOT: &str =
+        "7721491042898277899686830032817687831050368809629386580479309633507500868506";
+
+    fn subject_commitment() -> SubjectCommitment {
+        SubjectCommitment::from_decimal_str(SUBJECT_COMMITMENT).unwrap()
+    }
+
+    fn control_key_b() -> SigningKey {
+        signing_key(4)
+    }
 
 
     // --- Explicit test-only proof verifier (F-01) ---
@@ -582,6 +659,21 @@ mod tests {
         CredentialRootEnvelope,
         SigningKey,
     ) {
+        build_gate_with(CREDENTIAL_ROOT, FakeVerifier::new(ELIG_LABEL))
+    }
+
+    /// Gate with real Ed25519 roots/control, fake provenance, and the given
+    /// eligibility verifier bound to `credential_root`.
+    fn build_gate_with<EV: EligibilityVerifier>(
+        credential_root: &str,
+        eligibility: EV,
+    ) -> (
+        MatcherGate<InMemoryPersistence, FakeVerifier, EV>,
+        OrchardReceiverBytes,
+        IssuerRootEnvelope,
+        CredentialRootEnvelope,
+        SigningKey,
+    ) {
         // Issuer keys
         let sk_issuer = signing_key(1);
         let vk_issuer = sk_issuer.verifying_key();
@@ -609,7 +701,7 @@ mod tests {
         let cred_auth = CredentialRootAuthenticator::new(approved_cred, RootVersion::new(1));
 
         let cred_payload = zwa_credentials::CredentialRootPayload::new(
-            ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap(),
+            ActiveCredentialRoot::from_decimal_str(credential_root).unwrap(),
             auth_id,
             RootVersion::new(1),
             UnixSeconds::new(1_900_000_000),
@@ -624,6 +716,10 @@ mod tests {
         let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
         let mut approved_control = BTreeMap::new();
         approved_control.insert(recv_a, vk_control);
+        // Receiver B is also a genuinely controlled wallet (key 4), so F-02
+        // tests exercise an attacker who really controls B.
+        let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
+        approved_control.insert(recv_b, control_key_b().verifying_key());
         let control_auth = crate::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
 
         let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3);
@@ -633,7 +729,7 @@ mod tests {
             cred_auth,
             control_auth,
             FakeVerifier::new(PROV_LABEL),
-            FakeVerifier::new(ELIG_LABEL),
+            eligibility,
             replay,
         );
 
@@ -669,6 +765,7 @@ mod tests {
             issuer_envelope,
             credential_envelope: cred_envelope,
             approved_receiver: recv_a,
+            recipient_subject_commitment: subject_commitment(),
             control_challenge: challenge,
             control_response: response,
             provenance_proof: prov_proof,
@@ -677,6 +774,181 @@ mod tests {
         };
 
         (input, gate)
+    }
+
+    fn control_for(
+        receiver: OrchardReceiverBytes,
+        commitment: TradeCommitment,
+        key: &SigningKey,
+    ) -> (RecipientControlChallenge, RecipientControlResponse) {
+        let challenge = RecipientControlChallenge::new(
+            receiver,
+            [7u8; 32],
+            CONTROL_DOMAIN.to_vec(),
+            UnixSeconds::new(1_900_000_000),
+            UnixSeconds::new(2_100_000_000),
+            commitment,
+        )
+        .unwrap();
+        let response = RecipientControlResponse::sign(&challenge, key);
+        (challenge, response)
+    }
+
+    fn real_eligibility_proof() -> OpaqueProof {
+        OpaqueProof::new(include_str!("../../tests/fixtures/groth16/eligibility-proof.json").as_bytes()).unwrap()
+    }
+
+    /// Golden trade A input for a gate whose credential root is `credential_root`.
+    fn input_for_trade_a(
+        issuer_envelope: IssuerRootEnvelope,
+        credential_envelope: CredentialRootEnvelope,
+        recv_a: OrchardReceiverBytes,
+        sk_control: &SigningKey,
+        eligibility_proof: OpaqueProof,
+    ) -> GateInput {
+        let commitment = TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
+        let (control_challenge, control_response) = control_for(recv_a, commitment, sk_control);
+        GateInput {
+            intent: golden_intent(),
+            commitment,
+            issuer_envelope,
+            credential_envelope,
+            approved_receiver: recv_a,
+            recipient_subject_commitment: subject_commitment(),
+            control_challenge,
+            control_response,
+            provenance_proof: fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_COMMITMENT),
+            eligibility_proof,
+            now: UnixSeconds::new(1_900_000_100),
+        }
+    }
+
+    fn real_eligibility_gate() -> (
+        MatcherGate<InMemoryPersistence, FakeVerifier, EligibilityVerifierBackend>,
+        GateInput,
+    ) {
+        let (gate, recv_a, issuer_env, cred_env, sk_control) = build_gate_with(
+            REAL_CREDENTIAL_ROOT,
+            EligibilityVerifierBackend::from_fixture().unwrap(),
+        );
+        let input = input_for_trade_a(issuer_env, cred_env, recv_a, &sk_control, real_eligibility_proof());
+        (gate, input)
+    }
+
+    // --- F-02: recipient substitution ---
+
+    #[test]
+    fn f02_fixture_binding_matches_frozen_commitment_functions() {
+        let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+        let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
+        let secret = zwa_protocol::SubjectSecret::from_decimal_str(SUBJECT_SECRET).unwrap();
+        assert_eq!(zwa_commitments::subject_commitment(secret), subject_commitment());
+        let a = zwa_commitments::recipient_commitment(
+            subject_commitment(),
+            zwa_commitments::receiver_commitment(&recv_a),
+        );
+        let b = zwa_commitments::recipient_commitment(
+            subject_commitment(),
+            zwa_commitments::receiver_commitment(&recv_b),
+        );
+        assert_eq!(a.to_string(), RECIPIENT_COMMITMENT_A);
+        assert_eq!(b.to_string(), RECIPIENT_COMMITMENT_B);
+        assert_eq!(golden_intent().recipient_commitment.to_string(), RECIPIENT_COMMITMENT_A);
+    }
+
+    #[test]
+    fn f02_proof_for_a_with_control_of_b_is_rejected_before_proofs() {
+        let (mut input, gate) = valid_gate_input();
+        let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
+        // Attacker genuinely controls B and presents B as "approved".
+        let (challenge, response) = control_for(recv_b, input.commitment, &control_key_b());
+        input.approved_receiver = recv_b;
+        input.control_challenge = challenge;
+        input.control_response = response;
+        let commitment = input.commitment;
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+        assert_eq!(gate.provenance_verifier.calls(), 0);
+        assert_eq!(gate.eligibility_verifier.calls(), 0);
+        assert!(gate.replay_store().state(commitment).is_none());
+    }
+
+    #[test]
+    fn f02_real_eligibility_proof_receiver_a_control_a_passes() {
+        let (gate, input) = real_eligibility_gate();
+        let approval = gate.evaluate(input).unwrap();
+        let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
+        assert_eq!(approval.verified_control().receiver(), &recv_a);
+        assert_eq!(
+            approval.verified_control().receiver_commitment(),
+            zwa_commitments::receiver_commitment(&recv_a)
+        );
+    }
+
+    #[test]
+    fn f02_real_eligibility_proof_for_a_with_control_of_b_is_rejected() {
+        let (gate, mut input) = real_eligibility_gate();
+        let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
+        let (challenge, response) = control_for(recv_b, input.commitment, &control_key_b());
+        input.approved_receiver = recv_b;
+        input.control_challenge = challenge;
+        input.control_response = response;
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+    }
+
+    #[test]
+    fn f02_trade_bound_to_b_with_credential_proof_for_a_is_rejected() {
+        // Attacker re-commits the trade to receiver B (Phase 0G tradeB), controls
+        // B and opens the binding correctly, but only holds the eligibility
+        // proof generated for receiver A's trade. Phase1B (real verifier) rejects.
+        let (gate, mut input) = real_eligibility_gate();
+        let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
+        let mut intent_b = golden_intent();
+        intent_b.nonce = TradeNonce::new(7002);
+        intent_b.recipient_commitment = RecipientCommitment::from_decimal_str(RECIPIENT_COMMITMENT_B).unwrap();
+        let commitment_b = TradeCommitment::from_decimal_str(TRADE_B_COMMITMENT).unwrap();
+        let (challenge, response) = control_for(recv_b, commitment_b, &control_key_b());
+        input.intent = intent_b;
+        input.commitment = commitment_b;
+        input.approved_receiver = recv_b;
+        input.control_challenge = challenge;
+        input.control_response = response;
+        input.provenance_proof = fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_B_COMMITMENT);
+        let err = gate.evaluate(input).unwrap_err();
+        match err {
+            GateRejection::ProofInvalid(VerificationResult::Invalid { reason }) => {
+                assert_eq!(reason, VerificationProblem::ProofRejected);
+            }
+            other => panic!("expected real eligibility rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn f02_wrong_raw_receiver_fails() {
+        // Control still for A, but a different raw receiver is claimed approved.
+        let (mut input, gate) = valid_gate_input();
+        input.approved_receiver = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+    }
+
+    #[test]
+    fn f02_wrong_recipient_commitment_fails() {
+        // (a) Trade recipient commitment swapped without re-committing: the
+        //     checked-trade step rejects it.
+        let (mut input, gate) = valid_gate_input();
+        input.intent.recipient_commitment =
+            RecipientCommitment::from_decimal_str(RECIPIENT_COMMITMENT_B).unwrap();
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::CommitmentMismatch { .. }), "got {err:?}");
+
+        // (b) Wrong subject opening: binding does not re-derive the commitment.
+        let (mut input, gate) = valid_gate_input();
+        let other = zwa_protocol::SubjectSecret::from_decimal_str(OTHER_SUBJECT_SECRET).unwrap();
+        input.recipient_subject_commitment = zwa_commitments::subject_commitment(other);
+        let err = gate.evaluate(input).unwrap_err();
+        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
     }
 
     #[test]
@@ -1030,6 +1302,7 @@ mod tests {
             issuer_envelope,
             credential_envelope: cred_envelope,
             approved_receiver: recv_a,
+            recipient_subject_commitment: subject_commitment(),
             control_challenge: challenge,
             control_response: response,
             provenance_proof: prov_proof,
