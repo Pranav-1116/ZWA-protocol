@@ -1,3 +1,9 @@
+//! **ARCHIVED M4 PROTOTYPE — NOT COMPILED, NOT PRODUCTION (M3 remediation F-12).**
+//! The "Orchard ivk" control path below is a SIMULATION built from SHA-256 and
+//! Ed25519; it does not implement Orchard key derivation or Orchard semantics.
+//! Recipient control belongs to M2 (`zwa_matcher::control`); M3 consumes the
+//! M2-verified receiver from `MatcherApproval`.
+//!
 //! V4: Recipient-Control Real Path — Vikram V4 boundary.
 //!
 //! Current MVP uses `RecipientControlAuthenticator` with Ed25519 registry
@@ -10,7 +16,7 @@
 //! - `RecipientControlVerifier` trait is opaque boundary — `Box<dyn RecipientControlVerifier>` must work
 //! - MVP: `Ed25519RegistryControlVerifier` wraps `RecipientControlAuthenticator` — venue registers
 //!   which control key controls which approved receiver. Simple, auditable, no Orchard internals.
-//! - Real path: `RealOrchardIvkControlVerifier` — proves knowledge of Orchard ivk that derives receiver.
+//! - Simulated path (not real Orchard): `SimulatedOrchardIvkControlVerifier` — proves knowledge of Orchard ivk that derives receiver.
 //!   In real Zcash Orchard, receiver = (diversifier 11B, transmission_key 32B) where
 //!   transmission_key = DiversifyHash(diversifier) * ivk (Pallas scalar mul) per ZIP-32.
 //!   For this prototype, we simulate derivation via SHA256 for determinism without experimental orchard crate:
@@ -67,13 +73,20 @@ use zwa_matcher::control::CONTROL_DOMAIN;
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;
 
-/// Orchard ivk — 32B canonical, private witness material.
+/// Orchard ivk — 32B, private witness material (SIMULATED prototype, not the
+/// real Orchard `IncomingViewingKey` encoding).
 ///
-/// In real Orchard, ivk is 64B? Actually `orchard::keys::IncomingViewingKey` is 64B scalar?
-/// For this prototype we use 32B to keep distinct newtype and avoid re-encoding.
-/// This is private — must never be logged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Secret: never logged. M3 remediation F-11: no derived `Debug` (the manual
+/// impl below is redacted), no `Copy` (no silent duplicates of the secret),
+/// zeroized on drop.
+#[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct OrchardIvkBytes([u8; 32]);
+
+impl std::fmt::Debug for OrchardIvkBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OrchardIvkBytes(<redacted>)")
+    }
+}
 
 impl OrchardIvkBytes {
     #[must_use]
@@ -185,7 +198,7 @@ pub fn derive_nullifier(
 /// Contains ivk (private), diversifier, nullifier, and Ed25519 signature over canonical bytes
 /// using key derived from ivk. In real ZK, ivk would be hidden and proof would be Groth16.
 #[derive(Debug)]
-pub struct RealOrchardControlProof {
+pub struct SimulatedOrchardControlProof {
     ivk: OrchardIvkBytes,
     diversifier: OrchardDiversifier,
     nullifier: [u8; 32],
@@ -193,7 +206,7 @@ pub struct RealOrchardControlProof {
     _private: (),
 }
 
-impl RealOrchardControlProof {
+impl SimulatedOrchardControlProof {
     /// Creates proof by signing challenge canonical bytes with key derived from ivk.
     #[must_use]
     pub fn sign(challenge: &RecipientControlChallenge, ivk: &OrchardIvkBytes) -> Self {
@@ -202,7 +215,7 @@ impl RealOrchardControlProof {
         let signing_key = ivk.derive_signing_key();
         let sig = signing_key.sign(&challenge.canonical_bytes());
         Self {
-            ivk: *ivk,
+            ivk: ivk.clone(),
             diversifier,
             nullifier,
             signature: sig.to_bytes(),
@@ -239,7 +252,7 @@ impl RealOrchardControlProof {
 ///
 /// This verifier also checks transmission key derivation and nullifier binding.
 #[derive(Debug, Clone)]
-pub struct RealOrchardIvkControlVerifier {
+pub struct SimulatedOrchardIvkControlVerifier {
     /// Map receiver -> ivk commitment (SHA256(ivk)) — public, raw ivk private
     ivk_commitments: BTreeMap<OrchardReceiverBytes, [u8; 32]>,
     /// Map receiver -> verifying key derived from ivk — for signature verification
@@ -247,7 +260,7 @@ pub struct RealOrchardIvkControlVerifier {
     expected_domain: Vec<u8>,
 }
 
-impl RealOrchardIvkControlVerifier {
+impl SimulatedOrchardIvkControlVerifier {
     /// Builds verifier from ivk map — computes commitments and derived VKs.
     ///
     /// `ivks` is `receiver -> ivk` — in production, would be `receiver -> ivk_commitment` only,
@@ -387,7 +400,7 @@ impl RealOrchardIvkControlVerifier {
     }
 }
 
-impl RecipientControlVerifier for RealOrchardIvkControlVerifier {
+impl RecipientControlVerifier for SimulatedOrchardIvkControlVerifier {
     fn verify(
         &self,
         challenge: &RecipientControlChallenge,
@@ -504,13 +517,13 @@ impl RecipientControlVerifier for Ed25519RegistryControlVerifier {
 /// so `Box<dyn RecipientControlVerifier>` works.
 #[derive(Debug, Clone)]
 pub struct HybridControlVerifier {
-    real: RealOrchardIvkControlVerifier,
+    real: SimulatedOrchardIvkControlVerifier,
     ed25519: Ed25519RegistryControlVerifier,
 }
 
 impl HybridControlVerifier {
     #[must_use]
-    pub fn new(real: RealOrchardIvkControlVerifier, ed25519: Ed25519RegistryControlVerifier) -> Self {
+    pub fn new(real: SimulatedOrchardIvkControlVerifier, ed25519: Ed25519RegistryControlVerifier) -> Self {
         Self { real, ed25519 }
     }
 }
@@ -629,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn real_orchard_ivk_control_proves_ivk_derives_receiver() {
+    fn simulated_orchard_ivk_control_proves_ivk_derives_receiver() {
         // Real path: ivk -> transmission_key = H(ivk || diversifier) -> receiver
         let ivk = OrchardIvkBytes::new([20u8; 32]);
         let diversifier = OrchardDiversifier::new([1u8; 11]);
@@ -640,7 +653,7 @@ mod tests {
         let mut ivks = BTreeMap::new();
         ivks.insert(recv, ivk);
 
-        let real_verifier = RealOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
+        let real_verifier = SimulatedOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
 
         let nonce = [2u8; 32];
         let challenge = challenge_for(recv, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
@@ -666,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn real_orchard_ivk_invalid_ivk_fails() {
+    fn simulated_orchard_ivk_invalid_ivk_fails() {
         let ivk_real = OrchardIvkBytes::new([30u8; 32]);
         let ivk_fake = OrchardIvkBytes::new([31u8; 32]);
         let diversifier = OrchardDiversifier::new([2u8; 11]);
@@ -675,7 +688,7 @@ mod tests {
 
         let mut ivks = BTreeMap::new();
         ivks.insert(recv, ivk_real);
-        let real_verifier = RealOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
+        let real_verifier = SimulatedOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
 
         let nonce = [3u8; 32];
         let challenge = challenge_for(recv, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
@@ -704,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn real_orchard_receiver_mismatch_fails() {
+    fn simulated_orchard_receiver_mismatch_fails() {
         let ivk = OrchardIvkBytes::new([40u8; 32]);
         let diversifier_a = OrchardDiversifier::new([3u8; 11]);
         let diversifier_b = OrchardDiversifier::new([4u8; 11]);
@@ -714,7 +727,7 @@ mod tests {
 
         let mut ivks = BTreeMap::new();
         ivks.insert(recv_a, ivk);
-        let real_verifier = RealOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
+        let real_verifier = SimulatedOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
 
         let nonce = [4u8; 32];
         // Challenge for recv_a but we try to use recv_b in response — should fail
@@ -751,7 +764,7 @@ mod tests {
 
         let mut ivks = BTreeMap::new();
         ivks.insert(recv, ivk);
-        let real_verifier = RealOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
+        let real_verifier = SimulatedOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
 
         let nonce = [5u8; 32];
         let challenge = challenge_for(recv, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
@@ -789,7 +802,7 @@ mod tests {
 
         let mut ivks = BTreeMap::new();
         ivks.insert(recv_a, ivk);
-        let real_verifier = RealOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
+        let real_verifier = SimulatedOrchardIvkControlVerifier::from_ivks(ivks, CONTROL_DOMAIN.to_vec());
 
         // Ed25519 for receiver B (different receiver)
         let sk_b = SigningKey::from_bytes(&[61u8; 32]);
