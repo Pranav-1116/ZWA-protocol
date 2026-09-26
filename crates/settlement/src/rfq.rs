@@ -139,7 +139,7 @@ impl RfqRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{golden_intent, GOLDEN_TRADE_COMMITMENT};
+    use crate::test_support::{golden_intent, TermsEdit, GOLDEN_TRADE_COMMITMENT};
     use zwa_protocol::ZatoshiAmount;
 
     #[test]
@@ -155,7 +155,7 @@ mod tests {
     fn every_term_must_agree_exactly() {
         let approved = golden_intent();
         let other_rc = RecipientCommitment::from_decimal_str("42").unwrap();
-        let mutations: Vec<(&str, Box<dyn Fn(&mut RfqRequest)>)> = vec![
+        let mutations: Vec<(&str, TermsEdit)> = vec![
             (
                 "offered_asset",
                 Box::new(|r: &mut RfqRequest| r.offered_asset = r.requested_asset),

@@ -96,6 +96,10 @@ use crate::party_auth::{
     ExpectedParties, PartyAuthorization, PartyAuthorizationRequest, PartyVerificationKey,
     RegisteredPartyKeys,
 };
+use crate::rfq::RfqRequest;
+
+/// One labelled edit of RFQ terms (named to keep test tables readable).
+pub(crate) type TermsEdit = Box<dyn Fn(&mut RfqRequest)>;
 
 pub(crate) const ISSUANCE_ROOT: &str =
     "19309979006225485291788213177219598381134511159668519266888323889569746782051";

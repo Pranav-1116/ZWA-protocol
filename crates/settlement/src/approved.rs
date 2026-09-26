@@ -415,8 +415,8 @@ mod tests {
     };
     use crate::test_support::{
         approval_for, golden_intent, other_intent, party_key, registry_for, sign_locally,
-        signing_key, BUYER_SEED, GOLDEN_TRADE_COMMITMENT, RECEIVER_A_HEX, SELLER_SEED, T_ISSUED,
-        T_NOW,
+        signing_key, TermsEdit, BUYER_SEED, GOLDEN_TRADE_COMMITMENT, RECEIVER_A_HEX, SELLER_SEED,
+        T_ISSUED, T_NOW,
     };
 
     struct Flow {
@@ -661,7 +661,7 @@ mod tests {
     fn terms_changed_after_approval_reject() {
         let intent = golden_intent();
         let f = flow(&intent);
-        let changes: Vec<(&str, Box<dyn Fn(&mut RfqRequest)>)> = vec![
+        let changes: Vec<(&str, TermsEdit)> = vec![
             (
                 "recipient_commitment",
                 Box::new(|t: &mut RfqRequest| {
