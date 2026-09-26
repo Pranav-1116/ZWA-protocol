@@ -870,7 +870,6 @@ mod tests {
         let persistence = InMemoryPersistence::new();
         let coordinator = Arc::new(SettlementReplayCoordinator::new(persistence, 3));
         let approval = valid_approval();
-        let commitment = approval.commitment();
         let now = UnixSeconds::new(1_900_000_000);
 
         coordinator.create_from_approval(&approval).unwrap();
@@ -895,7 +894,6 @@ mod tests {
         let persistence = InMemoryPersistence::new();
         let coordinator = SettlementReplayCoordinator::new(persistence, 3);
         let approval = valid_approval();
-        let commitment = approval.commitment();
         let expiry = approval.intent().expiry.get();
         let now_at_expiry = UnixSeconds::new(expiry);
         let now_after_expiry = UnixSeconds::new(expiry + 1);

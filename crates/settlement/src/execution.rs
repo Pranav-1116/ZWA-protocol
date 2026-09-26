@@ -306,7 +306,8 @@ pub trait SettlementExecutorTrait: Send + Sync + std::fmt::Debug {
         buyer_receiver: Option<OrchardReceiverBytes>,
     ) -> Result<SettlementTxId, ExecutionError>;
 
-    fn state(&self, commitment: TradeCommitment) -> Option<TradeLifecycleState>;
+    /// Current lifecycle state; fails closed if the record cannot be loaded.
+    fn state(&self, commitment: TradeCommitment) -> Result<Option<TradeLifecycleState>, ExecutionError>;
 }
 
 impl<P: ReplayPersistence + std::fmt::Debug + 'static> SettlementExecutorTrait for SettlementExecutor<P> {
@@ -321,7 +322,7 @@ impl<P: ReplayPersistence + std::fmt::Debug + 'static> SettlementExecutorTrait f
         SettlementExecutor::execute_production(self, approval, seller_sk, buyer_sk, seller_receiver, buyer_receiver)
     }
 
-    fn state(&self, commitment: TradeCommitment) -> Option<TradeLifecycleState> {
+    fn state(&self, commitment: TradeCommitment) -> Result<Option<TradeLifecycleState>, ExecutionError> {
         SettlementExecutor::state(self, commitment)
     }
 }
@@ -349,8 +350,8 @@ impl SettlementExecutorTrait for UnconfiguredSettlementExecutor {
         Err(ExecutionError::Unconfigured)
     }
 
-    fn state(&self, _commitment: TradeCommitment) -> Option<TradeLifecycleState> {
-        None
+    fn state(&self, _commitment: TradeCommitment) -> Result<Option<TradeLifecycleState>, ExecutionError> {
+        Ok(None)
     }
 }
 
@@ -576,7 +577,6 @@ mod tests {
         ));
 
         let approval = valid_approval();
-        let commitment = approval.commitment();
 
         // Pre-create and verify to have race only on acquire
         executor.coordinator.replay().create_from_approval(&approval).unwrap();
