@@ -48,20 +48,20 @@ pub mod roots;
 pub mod verifiers;
 
 pub use checked::CheckedTrade;
-pub use control::{
-    RecipientControlAuthenticator, RecipientControlChallenge, RecipientControlResponse,
-    RecipientControlVerifier, UnconfiguredControlVerifier, VerifiedRecipientControl,
-    CONTROL_DOMAIN, DEFAULT_CONTROL_TTL_SECONDS, ControlError,
-};
 #[cfg(test)]
 pub use control::FakeControlVerifier;
-pub use gate::{GateInput, GateRejection, MatcherApproval, MatcherGate, VerifiedTrade};
-pub use replay::{
-    InMemoryPersistence, JsonFilePersistence, PersistenceError, PersistentReplayStore,
-    ReplayError, ReplayPersistence, ReplayRecord, RocksDbPersistence, PERSISTENCE_SCHEMA_VERSION,
+pub use control::{
+    ControlError, RecipientControlAuthenticator, RecipientControlChallenge,
+    RecipientControlResponse, RecipientControlVerifier, UnconfiguredControlVerifier,
+    VerifiedRecipientControl, CONTROL_DOMAIN, DEFAULT_CONTROL_TTL_SECONDS,
 };
+pub use gate::{GateInput, GateRejection, MatcherApproval, MatcherGate, VerifiedTrade};
 #[cfg(feature = "sqlite")]
 pub use replay::SqlitePersistence;
+pub use replay::{
+    CasWrite, InMemoryPersistence, JsonFilePersistence, PersistenceError, PersistentReplayStore,
+    ReplayError, ReplayPersistence, ReplayRecord, RocksDbPersistence, PERSISTENCE_SCHEMA_VERSION,
+};
 pub use roots::{
     check_combined_root_expiry, AuthenticatedCredentialRoot, AuthenticatedIssuerRoot,
     CredentialRootAuthenticator, IssuerRootAuthenticator, RootAuthError,

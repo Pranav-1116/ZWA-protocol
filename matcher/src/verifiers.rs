@@ -121,9 +121,11 @@ struct SnarkjsProofJson {
 
 fn fq_from_decimal(s: &str) -> Result<Fq, Groth16VerificationError> {
     // Parse decimal string via BigUint then to Fq via from_be_bytes_mod_order
-    let bigint = BigUint::parse_bytes(s.as_bytes(), 10).ok_or_else(|| Groth16VerificationError::FieldParse {
-        value: s.to_string(),
-        reason: "invalid decimal".to_string(),
+    let bigint = BigUint::parse_bytes(s.as_bytes(), 10).ok_or_else(|| {
+        Groth16VerificationError::FieldParse {
+            value: s.to_string(),
+            reason: "invalid decimal".to_string(),
+        }
     })?;
     let bytes = bigint.to_bytes_be();
     // ark-ff 0.5.0: Fq::from_be_bytes_mod_order
@@ -131,9 +133,11 @@ fn fq_from_decimal(s: &str) -> Result<Fq, Groth16VerificationError> {
 }
 
 fn fr_from_decimal(s: &str) -> Result<Fr, Groth16VerificationError> {
-    let bigint = BigUint::parse_bytes(s.as_bytes(), 10).ok_or_else(|| Groth16VerificationError::FieldParse {
-        value: s.to_string(),
-        reason: "invalid decimal".to_string(),
+    let bigint = BigUint::parse_bytes(s.as_bytes(), 10).ok_or_else(|| {
+        Groth16VerificationError::FieldParse {
+            value: s.to_string(),
+            reason: "invalid decimal".to_string(),
+        }
     })?;
     let bytes = bigint.to_bytes_be();
     Ok(Fr::from_be_bytes_mod_order(&bytes))
@@ -151,8 +155,10 @@ fn g1_from_snarkjs(point: &SnarkjsG1Json) -> Result<G1Affine, Groth16Verificatio
     }
 
     // For affine, z should be "1"
-    let x = fq_from_decimal(x_str).map_err(|e| Groth16VerificationError::G1Parse(format!("x {x_str}: {e}")))?;
-    let y = fq_from_decimal(y_str).map_err(|e| Groth16VerificationError::G1Parse(format!("y {y_str}: {e}")))?;
+    let x = fq_from_decimal(x_str)
+        .map_err(|e| Groth16VerificationError::G1Parse(format!("x {x_str}: {e}")))?;
+    let y = fq_from_decimal(y_str)
+        .map_err(|e| Groth16VerificationError::G1Parse(format!("y {y_str}: {e}")))?;
 
     // ark-bn254 G1Affine::new(x,y) checks on curve
     // Use new_unchecked for performance, but we want checked.
@@ -161,17 +167,23 @@ fn g1_from_snarkjs(point: &SnarkjsG1Json) -> Result<G1Affine, Groth16Verificatio
     let p = G1Affine::new_unchecked(x, y);
     // Verify on curve
     if !p.is_on_curve() {
-        return Err(Groth16VerificationError::G1Parse(format!("point not on curve: {x_str}, {y_str}")));
+        return Err(Groth16VerificationError::G1Parse(format!(
+            "point not on curve: {x_str}, {y_str}"
+        )));
     }
     if !p.is_in_correct_subgroup_assuming_on_curve() {
-        return Err(Groth16VerificationError::G1Parse(format!("point not in subgroup: {x_str}, {y_str}")));
+        return Err(Groth16VerificationError::G1Parse(format!(
+            "point not in subgroup: {x_str}, {y_str}"
+        )));
     }
     Ok(p)
 }
 
 fn fq2_from_c0_c1(c0_str: &str, c1_str: &str) -> Result<Fq2, Groth16VerificationError> {
-    let c0 = fq_from_decimal(c0_str).map_err(|e| Groth16VerificationError::G2Parse(format!("c0 {c0_str}: {e}")))?;
-    let c1 = fq_from_decimal(c1_str).map_err(|e| Groth16VerificationError::G2Parse(format!("c1 {c1_str}: {e}")))?;
+    let c0 = fq_from_decimal(c0_str)
+        .map_err(|e| Groth16VerificationError::G2Parse(format!("c0 {c0_str}: {e}")))?;
+    let c1 = fq_from_decimal(c1_str)
+        .map_err(|e| Groth16VerificationError::G2Parse(format!("c1 {c1_str}: {e}")))?;
     Ok(Fq2::new(c0, c1))
 }
 
@@ -185,8 +197,7 @@ fn g2_from_snarkjs(point: &SnarkjsG2Json) -> Result<G2Affine, Groth16Verificatio
     let z_c1 = &point[2][1];
 
     // Infinity check: all zeros or z = [0,0] — second condition subsumes first
-    if z_c0 == "0" && z_c1 == "0"
-    {
+    if z_c0 == "0" && z_c1 == "0" {
         return Ok(G2Affine::zero());
     }
 
@@ -389,7 +400,8 @@ impl ProvenanceVerifierBackend {
         // before it is treated as the frozen circuit's key.
         const VKEY_JSON: &str = include_str!("../../tests/fixtures/groth16/provenance-vkey.json");
         // Expected hash computed from fixture — prevents substitution
-        const EXPECTED_HASH: &str = "4831d3eef9575ef7daf318eb8767e1a39ef1e26da20339ddda137b1e246f1350";
+        const EXPECTED_HASH: &str =
+            "4831d3eef9575ef7daf318eb8767e1a39ef1e26da20339ddda137b1e246f1350";
         Self::from_vkey_json(VKEY_JSON, Some(EXPECTED_HASH))
     }
 
@@ -476,7 +488,8 @@ impl EligibilityVerifierBackend {
 
     pub fn from_fixture() -> Result<Self, Groth16VerificationError> {
         const VKEY_JSON: &str = include_str!("../../tests/fixtures/groth16/eligibility-vkey.json");
-        const EXPECTED_HASH: &str = "879d427a16f334edc163e78614c94dfe00c3ae3cb657c3ef4d7d82c39e4f5e75";
+        const EXPECTED_HASH: &str =
+            "879d427a16f334edc163e78614c94dfe00c3ae3cb657c3ef4d7d82c39e4f5e75";
         Self::from_vkey_json(VKEY_JSON, Some(EXPECTED_HASH))
     }
 
@@ -599,7 +612,11 @@ pub struct MatcherProofGate<PV = ProvenanceVerifierBackend, EV = EligibilityVeri
 
 impl<PV: ProvenanceVerifier, EV: EligibilityVerifier> MatcherProofGate<PV, EV> {
     #[must_use]
-    pub fn new(checked_trade: CheckedTrade, provenance_verifier: PV, eligibility_verifier: EV) -> Self {
+    pub fn new(
+        checked_trade: CheckedTrade,
+        provenance_verifier: PV,
+        eligibility_verifier: EV,
+    ) -> Self {
         Self {
             checked_trade,
             provenance_verifier,
@@ -684,7 +701,11 @@ mod tests {
         let proof = load_real_provenance_proof();
 
         let result = verifier.verify(root, commitment, &proof);
-        assert_eq!(result, VerificationResult::Valid, "real provenance proof must verify");
+        assert_eq!(
+            result,
+            VerificationResult::Valid,
+            "real provenance proof must verify"
+        );
     }
 
     #[test]
@@ -695,7 +716,11 @@ mod tests {
         let proof = load_real_eligibility_proof();
 
         let result = verifier.verify(root, commitment, &proof);
-        assert_eq!(result, VerificationResult::Valid, "real eligibility Phase1B proof must verify");
+        assert_eq!(
+            result,
+            VerificationResult::Valid,
+            "real eligibility Phase1B proof must verify"
+        );
     }
 
     #[test]
@@ -703,10 +728,14 @@ mod tests {
         let prov_verifier = ProvenanceVerifierBackend::from_fixture().unwrap();
         let elig_verifier = EligibilityVerifierBackend::from_fixture().unwrap();
 
-        let real_prov_root = AuthorizedIssuanceRoot::from_decimal_str(REAL_PROVENANCE_ROOT).unwrap();
-        let real_prov_commitment = TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
-        let _real_elig_root = ActiveCredentialRoot::from_decimal_str(REAL_ELIGIBILITY_ROOT).unwrap();
-        let real_elig_commitment = TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
+        let real_prov_root =
+            AuthorizedIssuanceRoot::from_decimal_str(REAL_PROVENANCE_ROOT).unwrap();
+        let real_prov_commitment =
+            TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
+        let _real_elig_root =
+            ActiveCredentialRoot::from_decimal_str(REAL_ELIGIBILITY_ROOT).unwrap();
+        let real_elig_commitment =
+            TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
 
         let prov_proof = load_real_provenance_proof();
         let elig_proof = load_real_eligibility_proof();
@@ -714,7 +743,11 @@ mod tests {
         // Wrong root
         let wrong_root = AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap();
         let result = prov_verifier.verify(wrong_root, real_prov_commitment, &prov_proof);
-        assert_ne!(result, VerificationResult::Valid, "wrong root must not verify");
+        assert_ne!(
+            result,
+            VerificationResult::Valid,
+            "wrong root must not verify"
+        );
         // Should be ProofRejected (ark returns false) or PublicInputMismatch equivalent
         assert!(!result.is_valid());
 
@@ -744,8 +777,10 @@ mod tests {
         let commitment = TradeCommitment::from_decimal_str(REAL_PROVENANCE_COMMITMENT).unwrap();
 
         // Alter proof bytes
-        let mut proof_json: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/groth16/provenance-proof.json")).unwrap();
+        let mut proof_json: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/groth16/provenance-proof.json"
+        ))
+        .unwrap();
         // Flip a bit in pi_a
         if let Some(pi_a) = proof_json.get_mut("pi_a") {
             if let Some(arr) = pi_a.as_array_mut() {
@@ -772,7 +807,8 @@ mod tests {
         );
 
         // Correct hash should pass
-        let verifier = ProvenanceVerifierBackend::from_vkey_json(VKEY_JSON, Some(computed_hash.as_str()));
+        let verifier =
+            ProvenanceVerifierBackend::from_vkey_json(VKEY_JSON, Some(computed_hash.as_str()));
         assert!(verifier.is_ok());
 
         // Wrong hash must fail
@@ -791,26 +827,26 @@ mod tests {
     #[test]
     fn matcher_proof_gate_enforces_same_commitment_with_real_proofs() {
         use crate::checked::CheckedTrade;
-        use crate::roots::{
-            CredentialRootAuthenticator,
-            IssuerRootAuthenticator,
-        };
+        use crate::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
+        use ed25519_dalek::Signer;
         use ed25519_dalek::SigningKey;
         use std::collections::BTreeMap;
         use zwa_credentials::{AuthorityKeyId, IssuerKeyId};
         use zwa_protocol::{
-            AssetBaseBytes, MatcherFee, OpaqueSignature, PolicyRoot, RecipientCommitment, RootVersion,
-            TradeAmount, TradeExpiry, TradeIntent, TradeNonce, UnixSeconds, ZatoshiAmount,
+            AssetBaseBytes, MatcherFee, OpaqueSignature, PolicyRoot, RecipientCommitment,
+            RootVersion, TradeAmount, TradeExpiry, TradeIntent, TradeNonce, UnixSeconds,
+            ZatoshiAmount,
         };
-        use ed25519_dalek::Signer;
 
         // Build checked trade for REAL_PROVENANCE_COMMITMENT (Phase0F)
-        let offered_asset =
-            AssetBaseBytes::from_hex("4889ad11564115f3655f7e434bffb23074d42aafd58cfecae32a5b5eafaf5301")
-                .unwrap();
-        let requested_asset =
-            AssetBaseBytes::from_hex("a7ac13ded8b51e7a59c400097b70fe6d5d855b30ad19b1897de1fd74721a9339")
-                .unwrap();
+        let offered_asset = AssetBaseBytes::from_hex(
+            "4889ad11564115f3655f7e434bffb23074d42aafd58cfecae32a5b5eafaf5301",
+        )
+        .unwrap();
+        let requested_asset = AssetBaseBytes::from_hex(
+            "a7ac13ded8b51e7a59c400097b70fe6d5d855b30ad19b1897de1fd74721a9339",
+        )
+        .unwrap();
         let intent = TradeIntent {
             offered_asset,
             offered_amount: TradeAmount::new(10),
@@ -851,10 +887,16 @@ mod tests {
         )
         .unwrap();
         let sig = sk_issuer.sign(&issuer_payload.canonical_bytes());
-        let issuer_envelope =
-            zwa_credentials::IssuerRootEnvelope::new(issuer_payload, OpaqueSignature::new(&sig.to_bytes()).unwrap());
+        let issuer_envelope = zwa_credentials::IssuerRootEnvelope::new(
+            issuer_payload,
+            OpaqueSignature::new(&sig.to_bytes()).unwrap(),
+        );
         let auth_issuer = issuer_auth
-            .authenticate(&issuer_envelope, UnixSeconds::new(2_000_000_000), TradeExpiry::new(2_000_000_000))
+            .authenticate(
+                &issuer_envelope,
+                UnixSeconds::new(2_000_000_000),
+                TradeExpiry::new(2_000_000_000),
+            )
             .unwrap();
 
         // For eligibility, we need real eligibility root
@@ -873,10 +915,16 @@ mod tests {
         )
         .unwrap();
         let sig2 = sk_cred.sign(&cred_payload.canonical_bytes());
-        let cred_envelope =
-            zwa_credentials::CredentialRootEnvelope::new(cred_payload, OpaqueSignature::new(&sig2.to_bytes()).unwrap());
+        let cred_envelope = zwa_credentials::CredentialRootEnvelope::new(
+            cred_payload,
+            OpaqueSignature::new(&sig2.to_bytes()).unwrap(),
+        );
         let auth_cred = cred_auth
-            .authenticate(&cred_envelope, UnixSeconds::new(2_000_000_000), TradeExpiry::new(2_000_000_000))
+            .authenticate(
+                &cred_envelope,
+                UnixSeconds::new(2_000_000_000),
+                TradeExpiry::new(2_000_000_000),
+            )
             .unwrap();
 
         // Use real verifiers
@@ -902,14 +950,11 @@ mod tests {
             .unwrap();
             i
         };
-        let commitment_elig = TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
+        let commitment_elig =
+            TradeCommitment::from_decimal_str(REAL_ELIGIBILITY_COMMITMENT).unwrap();
         let checked_elig = CheckedTrade::new(intent_elig, commitment_elig).unwrap();
 
-        let gate = MatcherProofGate::new(
-            checked_elig,
-            prov_backend,
-            elig_backend,
-        );
+        let gate = MatcherProofGate::new(checked_elig, prov_backend, elig_backend);
 
         // This will fail for provenance because provenance proof is for different root/commitment
         // But we want to test same-commitment invariant: if we try to verify provenance proof (for 7409...) with eligibility commitment (10187...), it must fail
@@ -917,15 +962,18 @@ mod tests {
         let elig_proof = load_real_eligibility_proof();
 
         // Provenance proof should NOT verify against eligibility commitment
-        let prov_result = gate
-            .provenance_verifier
-            .verify(auth_issuer.root(), commitment_elig, &prov_proof);
-        assert!(!prov_result.is_valid(), "provenance proof for 7409... must not verify for 10187... commitment");
+        let prov_result =
+            gate.provenance_verifier
+                .verify(auth_issuer.root(), commitment_elig, &prov_proof);
+        assert!(
+            !prov_result.is_valid(),
+            "provenance proof for 7409... must not verify for 10187... commitment"
+        );
 
         // Eligibility proof should verify against its own commitment
-        let elig_result = gate
-            .eligibility_verifier
-            .verify(auth_cred.root(), commitment_elig, &elig_proof);
+        let elig_result =
+            gate.eligibility_verifier
+                .verify(auth_cred.root(), commitment_elig, &elig_proof);
         assert_eq!(elig_result, VerificationResult::Valid);
 
         // Splicing test: try to verify both with same checked trade but mismatched proofs
@@ -1011,12 +1059,20 @@ mod tests {
         let e_proof = load_real_eligibility_proof();
         assert_eq!(prov.verify(p_root, e_c, &p_proof), rejected);
         assert_eq!(
-            prov.verify(AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(), p_c, &p_proof),
+            prov.verify(
+                AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(),
+                p_c,
+                &p_proof
+            ),
             rejected
         );
         assert_eq!(elig.verify(e_root, p_c, &e_proof), rejected);
         assert_eq!(
-            elig.verify(ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap(), e_c, &e_proof),
+            elig.verify(
+                ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap(),
+                e_c,
+                &e_proof
+            ),
             rejected
         );
     }
@@ -1039,19 +1095,25 @@ mod tests {
         missing_field.as_object_mut().unwrap().remove("pi_b");
 
         let cases: Vec<Vec<u8>> = vec![
-            vec![0xff, 0xfe, 0x00],                         // not UTF-8
-            b"{".to_vec(),                                  // truncated JSON
-            b"null".to_vec(),                               // wrong JSON type
-            b"{}".to_vec(),                                 // empty object
-            real.as_bytes()[..real.len() / 2].to_vec(),     // truncated real proof
-            serde_json::to_vec(&off_curve).unwrap(),        // point not on curve
-            serde_json::to_vec(&not_a_number).unwrap(),     // non-decimal coordinate
-            serde_json::to_vec(&missing_field).unwrap(),    // missing pi_b
+            vec![0xff, 0xfe, 0x00],                      // not UTF-8
+            b"{".to_vec(),                               // truncated JSON
+            b"null".to_vec(),                            // wrong JSON type
+            b"{}".to_vec(),                              // empty object
+            real.as_bytes()[..real.len() / 2].to_vec(),  // truncated real proof
+            serde_json::to_vec(&off_curve).unwrap(),     // point not on curve
+            serde_json::to_vec(&not_a_number).unwrap(),  // non-decimal coordinate
+            serde_json::to_vec(&missing_field).unwrap(), // missing pi_b
         ];
         for (i, bytes) in cases.iter().enumerate() {
             let proof = OpaqueProof::new(bytes).unwrap();
-            assert!(!prov.verify(p_root, p_c, &proof).is_valid(), "provenance case {i}");
-            assert!(!elig.verify(e_root, e_c, &proof).is_valid(), "eligibility case {i}");
+            assert!(
+                !prov.verify(p_root, p_c, &proof).is_valid(),
+                "provenance case {i}"
+            );
+            assert!(
+                !elig.verify(e_root, e_c, &proof).is_valid(),
+                "eligibility case {i}"
+            );
         }
         // Non-parsable shapes are specifically ProofMalformed.
         for bytes in &cases[..5] {

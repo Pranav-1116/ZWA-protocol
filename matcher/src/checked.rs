@@ -105,10 +105,7 @@ impl CheckedTrade {
     ///
     /// Propagates `ProtocolError::AlreadyConsumed` if the commitment was already
     /// consumed, or `InvalidStateTransition` if a record already exists.
-    pub fn create_replay_record(
-        &self,
-        store: &mut ReplayStore,
-    ) -> Result<TradeRecord> {
+    pub fn create_replay_record(&self, store: &mut ReplayStore) -> Result<TradeRecord> {
         store.create(self.commitment, self.intent)
     }
 
@@ -138,12 +135,14 @@ mod tests {
     fn golden_intent() -> TradeIntent {
         // Reconstructs the Phase 0G eligible-reference-trade-v1 intent.
         // Values taken from tests/fixtures/eligible-reference-trade-v1.json
-        let offered_asset =
-            AssetBaseBytes::from_hex("4889ad11564115f3655f7e434bffb23074d42aafd58cfecae32a5b5eafaf5301")
-                .unwrap();
-        let requested_asset =
-            AssetBaseBytes::from_hex("a7ac13ded8b51e7a59c400097b70fe6d5d855b30ad19b1897de1fd74721a9339")
-                .unwrap();
+        let offered_asset = AssetBaseBytes::from_hex(
+            "4889ad11564115f3655f7e434bffb23074d42aafd58cfecae32a5b5eafaf5301",
+        )
+        .unwrap();
+        let requested_asset = AssetBaseBytes::from_hex(
+            "a7ac13ded8b51e7a59c400097b70fe6d5d855b30ad19b1897de1fd74721a9339",
+        )
+        .unwrap();
         TradeIntent {
             offered_asset,
             offered_amount: TradeAmount::new(10),
@@ -175,7 +174,10 @@ mod tests {
         let commitment = TradeCommitment::from_decimal_str(PHASE_0G_GOLDEN).unwrap();
         let checked = CheckedTrade::new(intent, commitment).unwrap();
         assert_eq!(checked.commitment().to_string(), PHASE_0G_GOLDEN);
-        assert_eq!(checked.parts().trade_commitment.to_string(), PHASE_0G_GOLDEN);
+        assert_eq!(
+            checked.parts().trade_commitment.to_string(),
+            PHASE_0G_GOLDEN
+        );
     }
 
     #[test]
@@ -223,8 +225,7 @@ mod tests {
         // This mirrors crates/commitments/tests/phase0_vectors.rs::phase0g_golden_trade_field_mutations_change_the_commitment
         // but at the CheckedTrade boundary — each mutation must be rejected before replay.
         let original = golden_intent();
-        let original_commitment =
-            TradeCommitment::from_decimal_str(PHASE_0G_GOLDEN).unwrap();
+        let original_commitment = TradeCommitment::from_decimal_str(PHASE_0G_GOLDEN).unwrap();
 
         // Sanity: original passes
         assert!(CheckedTrade::new(original, original_commitment).is_ok());
@@ -234,86 +235,56 @@ mod tests {
         let mutated_policy = PolicyRoot::new(FieldElement::from_u64(1));
 
         let cases: [(&str, TradeIntent); 10] = [
-            (
-                "offered amount 10 → 11",
-                {
-                    let mut intent = original;
-                    intent.offered_amount = TradeAmount::new(11);
-                    intent
-                },
-            ),
-            (
-                "requested amount 6 → 7",
-                {
-                    let mut intent = original;
-                    intent.requested_amount = TradeAmount::new(7);
-                    intent
-                },
-            ),
-            (
-                "matcher fee 5 → 6",
-                {
-                    let mut intent = original;
-                    intent.matcher_fee.amount = ZatoshiAmount::new(6);
-                    intent
-                },
-            ),
-            (
-                "recipient commitment mutation",
-                {
-                    let mut intent = original;
-                    intent.recipient_commitment = mutated_recipient;
-                    intent
-                },
-            ),
-            (
-                "matcher fee recipient mutation",
-                {
-                    let mut intent = original;
-                    intent.matcher_fee.recipient_commitment = mutated_fee_recipient;
-                    intent
-                },
-            ),
-            (
-                "policy root mutation",
-                {
-                    let mut intent = original;
-                    intent.policy_root = mutated_policy;
-                    intent
-                },
-            ),
-            (
-                "nonce mutation",
-                {
-                    let mut intent = original;
-                    intent.nonce = TradeNonce::new(7002);
-                    intent
-                },
-            ),
-            (
-                "expiry mutation",
-                {
-                    let mut intent = original;
-                    intent.expiry = TradeExpiry::new(2_000_000_001);
-                    intent
-                },
-            ),
-            (
-                "offered AssetBase mutation",
-                {
-                    let mut intent = original;
-                    intent.offered_asset = flip_first_asset_byte(original.offered_asset);
-                    intent
-                },
-            ),
-            (
-                "requested AssetBase mutation",
-                {
-                    let mut intent = original;
-                    intent.requested_asset = flip_first_asset_byte(original.requested_asset);
-                    intent
-                },
-            ),
+            ("offered amount 10 → 11", {
+                let mut intent = original;
+                intent.offered_amount = TradeAmount::new(11);
+                intent
+            }),
+            ("requested amount 6 → 7", {
+                let mut intent = original;
+                intent.requested_amount = TradeAmount::new(7);
+                intent
+            }),
+            ("matcher fee 5 → 6", {
+                let mut intent = original;
+                intent.matcher_fee.amount = ZatoshiAmount::new(6);
+                intent
+            }),
+            ("recipient commitment mutation", {
+                let mut intent = original;
+                intent.recipient_commitment = mutated_recipient;
+                intent
+            }),
+            ("matcher fee recipient mutation", {
+                let mut intent = original;
+                intent.matcher_fee.recipient_commitment = mutated_fee_recipient;
+                intent
+            }),
+            ("policy root mutation", {
+                let mut intent = original;
+                intent.policy_root = mutated_policy;
+                intent
+            }),
+            ("nonce mutation", {
+                let mut intent = original;
+                intent.nonce = TradeNonce::new(7002);
+                intent
+            }),
+            ("expiry mutation", {
+                let mut intent = original;
+                intent.expiry = TradeExpiry::new(2_000_000_001);
+                intent
+            }),
+            ("offered AssetBase mutation", {
+                let mut intent = original;
+                intent.offered_asset = flip_first_asset_byte(original.offered_asset);
+                intent
+            }),
+            ("requested AssetBase mutation", {
+                let mut intent = original;
+                intent.requested_asset = flip_first_asset_byte(original.requested_asset);
+                intent
+            }),
         ];
 
         for (label, mutated) in cases {
@@ -325,7 +296,10 @@ mod tests {
             // Ensure error is CommitmentMismatch, not generic
             match err.unwrap_err() {
                 zwa_protocol::error::ProtocolError::CommitmentMismatch { expected, actual } => {
-                    assert_eq!(expected, PHASE_0G_GOLDEN, "{label} expected should be golden");
+                    assert_eq!(
+                        expected, PHASE_0G_GOLDEN,
+                        "{label} expected should be golden"
+                    );
                     assert_ne!(actual, PHASE_0G_GOLDEN, "{label} actual must not be golden");
                     assert_eq!(
                         actual,

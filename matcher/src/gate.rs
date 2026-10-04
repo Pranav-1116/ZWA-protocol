@@ -49,17 +49,24 @@
 use zwa_credentials::{CredentialRootEnvelope, IssuerRootEnvelope};
 use zwa_protocol::bytes::OrchardReceiverBytes;
 use zwa_protocol::numbers::UnixSeconds;
-use zwa_protocol::proof::{EligibilityVerifier, OpaqueProof, ProvenanceVerifier, VerificationResult};
+use zwa_protocol::proof::{
+    EligibilityVerifier, OpaqueProof, ProvenanceVerifier, VerificationResult,
+};
 use zwa_protocol::{SubjectCommitment, TradeCommitment, TradeIntent};
 
 use crate::checked::CheckedTrade;
-use crate::control::{ControlError, RecipientControlAuthenticator, RecipientControlChallenge, RecipientControlResponse, VerifiedRecipientControl};
+use crate::control::{
+    ControlError, RecipientControlAuthenticator, RecipientControlChallenge,
+    RecipientControlResponse, VerifiedRecipientControl,
+};
 use crate::replay::{PersistentReplayStore, ReplayError, ReplayPersistence};
 use crate::roots::{
     check_combined_root_expiry, AuthenticatedCredentialRoot, AuthenticatedIssuerRoot,
     CredentialRootAuthenticator, IssuerRootAuthenticator, RootAuthError,
 };
-use crate::verifiers::{verify_trade_proofs, EligibilityVerifierBackend, ProvenanceVerifierBackend};
+use crate::verifiers::{
+    verify_trade_proofs, EligibilityVerifierBackend, ProvenanceVerifierBackend,
+};
 
 /// Typed rejection reasons for deterministic allow/block decision.
 ///
@@ -105,7 +112,9 @@ pub enum GateRejection {
     /// equal the trade's `recipient_commitment`, so the receiver whose control
     /// was presented is not the receiver the trade (and therefore the
     /// eligibility credential) is bound to.
-    #[error("recipient binding mismatch: approved receiver is not the trade's committed recipient")]
+    #[error(
+        "recipient binding mismatch: approved receiver is not the trade's committed recipient"
+    )]
     RecipientBindingMismatch,
 
     #[error("approved receiver mismatch: expected {expected:?}, got {got:?}")]
@@ -327,14 +336,13 @@ where
         use zwa_protocol::lifecycle::TradeLifecycleState as S;
 
         // 1. Checked trade context — fix ZWA-REL-001.
-        let checked_trade = CheckedTrade::new(input.intent, input.commitment).map_err(|e| {
-            match e {
+        let checked_trade =
+            CheckedTrade::new(input.intent, input.commitment).map_err(|e| match e {
                 zwa_protocol::error::ProtocolError::CommitmentMismatch { expected, actual } => {
                     GateRejection::CommitmentMismatch { expected, actual }
                 }
                 other => GateRejection::Replay(ReplayError::Protocol(other)),
-            }
-        })?;
+            })?;
         let commitment = checked_trade.commitment();
 
         // 2. Read-only replay precheck (no mutation).
@@ -383,12 +391,8 @@ where
             )
             .map_err(GateRejection::RootAuth)?;
 
-        check_combined_root_expiry(
-            checked_trade.intent().expiry,
-            &auth_issuer,
-            &auth_cred,
-        )
-        .map_err(GateRejection::RootAuth)?;
+        check_combined_root_expiry(checked_trade.intent().expiry, &auth_issuer, &auth_cred)
+            .map_err(GateRejection::RootAuth)?;
 
         // 5a (F-02): bind the raw approved receiver to the trade.
         //
@@ -423,11 +427,8 @@ where
         )
         .map_err(GateRejection::Control)?;
 
-        RecipientControlAuthenticator::check_trade_commitment(
-            commitment,
-            &input.control_challenge,
-        )
-        .map_err(GateRejection::Control)?;
+        RecipientControlAuthenticator::check_trade_commitment(commitment, &input.control_challenge)
+            .map_err(GateRejection::Control)?;
 
         let verified_control = self
             .control_authenticator
@@ -516,18 +517,18 @@ mod tests {
     use crate::control::{RecipientControlChallenge, RecipientControlResponse, CONTROL_DOMAIN};
     use crate::replay::{InMemoryPersistence, PersistentReplayStore};
     use crate::roots::{CredentialRootAuthenticator, IssuerRootAuthenticator};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use zwa_protocol::proof::VerificationProblem;
     use ed25519_dalek::{Signer, SigningKey};
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use zwa_credentials::{AuthorityKeyId, IssuerKeyId};
     use zwa_protocol::bytes::OrchardReceiverBytes;
     use zwa_protocol::numbers::{RootVersion, TradeExpiry, UnixSeconds};
+    use zwa_protocol::proof::VerificationProblem;
     use zwa_protocol::proof::{EligibilityVerifier, OpaqueProof, ProvenanceVerifier};
     use zwa_protocol::{
-        AssetBaseBytes, AuthorizedIssuanceRoot, ActiveCredentialRoot, MatcherFee, OpaqueSignature,
-        PolicyRoot, RecipientCommitment, TradeAmount, TradeNonce, ZatoshiAmount, TradeIntent,
+        ActiveCredentialRoot, AssetBaseBytes, AuthorizedIssuanceRoot, MatcherFee, OpaqueSignature,
+        PolicyRoot, RecipientCommitment, TradeAmount, TradeIntent, TradeNonce, ZatoshiAmount,
     };
 
     const ISSUANCE_ROOT: &str =
@@ -566,7 +567,6 @@ mod tests {
         signing_key(4)
     }
 
-
     // --- Explicit test-only proof verifier (F-01) ---
     //
     // Injected through the frozen verifier traits. Compiled only under
@@ -588,32 +588,52 @@ mod tests {
 
     impl FakeVerifier {
         fn new(label: &'static str) -> Self {
-            Self { label, calls: Arc::new(AtomicUsize::new(0)) }
+            Self {
+                label,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
 
-        fn check(&self, root: String, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+        fn check(
+            &self,
+            root: String,
+            commitment: TradeCommitment,
+            proof: &OpaqueProof,
+        ) -> VerificationResult {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let expected = format!("{}|{}|{}", self.label, root, commitment);
             if proof.as_bytes() == expected.as_bytes() {
                 VerificationResult::Valid
             } else {
-                VerificationResult::Invalid { reason: VerificationProblem::ProofRejected }
+                VerificationResult::Invalid {
+                    reason: VerificationProblem::ProofRejected,
+                }
             }
         }
     }
 
     impl ProvenanceVerifier for FakeVerifier {
-        fn verify(&self, root: AuthorizedIssuanceRoot, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+        fn verify(
+            &self,
+            root: AuthorizedIssuanceRoot,
+            commitment: TradeCommitment,
+            proof: &OpaqueProof,
+        ) -> VerificationResult {
             self.check(root.to_string(), commitment, proof)
         }
     }
 
     impl EligibilityVerifier for FakeVerifier {
-        fn verify(&self, root: ActiveCredentialRoot, commitment: TradeCommitment, proof: &OpaqueProof) -> VerificationResult {
+        fn verify(
+            &self,
+            root: ActiveCredentialRoot,
+            commitment: TradeCommitment,
+            proof: &OpaqueProof,
+        ) -> VerificationResult {
             self.check(root.to_string(), commitment, proof)
         }
     }
@@ -629,16 +649,34 @@ mod tests {
     }
 
     fn golden_intent() -> TradeIntent {
-        let offered_asset = AssetBaseBytes::from_hex("4889ad11564115f3655f7e434bffb23074d42aafd58cfecae32a5b5eafaf5301").unwrap();
-        let requested_asset = AssetBaseBytes::from_hex("a7ac13ded8b51e7a59c400097b70fe6d5d855b30ad19b1897de1fd74721a9339").unwrap();
+        let offered_asset = AssetBaseBytes::from_hex(
+            "4889ad11564115f3655f7e434bffb23074d42aafd58cfecae32a5b5eafaf5301",
+        )
+        .unwrap();
+        let requested_asset = AssetBaseBytes::from_hex(
+            "a7ac13ded8b51e7a59c400097b70fe6d5d855b30ad19b1897de1fd74721a9339",
+        )
+        .unwrap();
         TradeIntent {
             offered_asset,
             offered_amount: TradeAmount::new(10),
             requested_asset,
             requested_amount: TradeAmount::new(6),
-            recipient_commitment: RecipientCommitment::from_decimal_str("13135279047718387126053226034283670929172341955108098732820235388025453726181").unwrap(),
-            policy_root: PolicyRoot::from_decimal_str("1514393595722546217125953798550283818470332284949639873172624869558831825935").unwrap(),
-            matcher_fee: MatcherFee::new(ZatoshiAmount::new(5), RecipientCommitment::from_decimal_str("1800273984094439421343257609634901689467303577600258601269976617936586404380").unwrap()),
+            recipient_commitment: RecipientCommitment::from_decimal_str(
+                "13135279047718387126053226034283670929172341955108098732820235388025453726181",
+            )
+            .unwrap(),
+            policy_root: PolicyRoot::from_decimal_str(
+                "1514393595722546217125953798550283818470332284949639873172624869558831825935",
+            )
+            .unwrap(),
+            matcher_fee: MatcherFee::new(
+                ZatoshiAmount::new(5),
+                RecipientCommitment::from_decimal_str(
+                    "1800273984094439421343257609634901689467303577600258601269976617936586404380",
+                )
+                .unwrap(),
+            ),
             nonce: TradeNonce::new(7001),
             expiry: TradeExpiry::new(2_000_000_000),
         }
@@ -680,9 +718,13 @@ mod tests {
             RootVersion::new(1),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
-        ).unwrap();
+        )
+        .unwrap();
         let sig = sk_issuer.sign(&issuer_payload.canonical_bytes());
-        let issuer_envelope = zwa_credentials::IssuerRootEnvelope::new(issuer_payload, OpaqueSignature::new(&sig.to_bytes()).unwrap());
+        let issuer_envelope = zwa_credentials::IssuerRootEnvelope::new(
+            issuer_payload,
+            OpaqueSignature::new(&sig.to_bytes()).unwrap(),
+        );
 
         // Credential keys
         let sk_cred = signing_key(2);
@@ -698,9 +740,13 @@ mod tests {
             RootVersion::new(1),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
-        ).unwrap();
+        )
+        .unwrap();
         let sig2 = sk_cred.sign(&cred_payload.canonical_bytes());
-        let cred_envelope = zwa_credentials::CredentialRootEnvelope::new(cred_payload, OpaqueSignature::new(&sig2.to_bytes()).unwrap());
+        let cred_envelope = zwa_credentials::CredentialRootEnvelope::new(
+            cred_payload,
+            OpaqueSignature::new(&sig2.to_bytes()).unwrap(),
+        );
 
         // Control keys — receiver A controlled by sk_control
         let sk_control = signing_key(3);
@@ -712,7 +758,10 @@ mod tests {
         // tests exercise an attacker who really controls B.
         let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
         approved_control.insert(recv_b, control_key_b().verifying_key());
-        let control_auth = crate::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
+        let control_auth = crate::control::RecipientControlAuthenticator::new(
+            approved_control,
+            CONTROL_DOMAIN.to_vec(),
+        );
 
         let replay = PersistentReplayStore::new(InMemoryPersistence::new(), 3).unwrap();
 
@@ -728,10 +777,7 @@ mod tests {
         (gate, recv_a, issuer_envelope, cred_envelope, sk_control)
     }
 
-    fn valid_gate_input() -> (
-        GateInput,
-        TestGate,
-    ) {
+    fn valid_gate_input() -> (GateInput, TestGate) {
         let (gate, recv_a, issuer_envelope, cred_envelope, sk_control) = build_gate();
         let intent = golden_intent();
         let commitment = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
@@ -787,7 +833,10 @@ mod tests {
     }
 
     fn real_eligibility_proof() -> OpaqueProof {
-        OpaqueProof::new(include_str!("../../tests/fixtures/groth16/eligibility-proof.json").as_bytes()).unwrap()
+        OpaqueProof::new(
+            include_str!("../../tests/fixtures/groth16/eligibility-proof.json").as_bytes(),
+        )
+        .unwrap()
     }
 
     /// Golden trade A input for a gate whose credential root is `credential_root`.
@@ -823,7 +872,13 @@ mod tests {
             REAL_CREDENTIAL_ROOT,
             EligibilityVerifierBackend::from_fixture().unwrap(),
         );
-        let input = input_for_trade_a(issuer_env, cred_env, recv_a, &sk_control, real_eligibility_proof());
+        let input = input_for_trade_a(
+            issuer_env,
+            cred_env,
+            recv_a,
+            &sk_control,
+            real_eligibility_proof(),
+        );
         (gate, input)
     }
 
@@ -834,7 +889,10 @@ mod tests {
         let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
         let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
         let secret = zwa_protocol::SubjectSecret::from_decimal_str(SUBJECT_SECRET).unwrap();
-        assert_eq!(zwa_commitments::subject_commitment(secret), subject_commitment());
+        assert_eq!(
+            zwa_commitments::subject_commitment(secret),
+            subject_commitment()
+        );
         let a = zwa_commitments::recipient_commitment(
             subject_commitment(),
             zwa_commitments::receiver_commitment(&recv_a),
@@ -845,7 +903,10 @@ mod tests {
         );
         assert_eq!(a.to_string(), RECIPIENT_COMMITMENT_A);
         assert_eq!(b.to_string(), RECIPIENT_COMMITMENT_B);
-        assert_eq!(golden_intent().recipient_commitment.to_string(), RECIPIENT_COMMITMENT_A);
+        assert_eq!(
+            golden_intent().recipient_commitment.to_string(),
+            RECIPIENT_COMMITMENT_A
+        );
     }
 
     #[test]
@@ -859,7 +920,10 @@ mod tests {
         input.control_response = response;
         let commitment = input.commitment;
         let err = gate.evaluate(input).unwrap_err();
-        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+        assert!(
+            matches!(err, GateRejection::RecipientBindingMismatch),
+            "got {err:?}"
+        );
         assert_eq!(gate.provenance_verifier.calls(), 0);
         assert_eq!(gate.eligibility_verifier.calls(), 0);
         assert!(gate.replay_store().state(commitment).unwrap().is_none());
@@ -886,7 +950,10 @@ mod tests {
         input.control_challenge = challenge;
         input.control_response = response;
         let err = gate.evaluate(input).unwrap_err();
-        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+        assert!(
+            matches!(err, GateRejection::RecipientBindingMismatch),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -898,7 +965,8 @@ mod tests {
         let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
         let mut intent_b = golden_intent();
         intent_b.nonce = TradeNonce::new(7002);
-        intent_b.recipient_commitment = RecipientCommitment::from_decimal_str(RECIPIENT_COMMITMENT_B).unwrap();
+        intent_b.recipient_commitment =
+            RecipientCommitment::from_decimal_str(RECIPIENT_COMMITMENT_B).unwrap();
         let commitment_b = TradeCommitment::from_decimal_str(TRADE_B_COMMITMENT).unwrap();
         let (challenge, response) = control_for(recv_b, commitment_b, &control_key_b());
         input.intent = intent_b;
@@ -922,7 +990,10 @@ mod tests {
         let (mut input, gate) = valid_gate_input();
         input.approved_receiver = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
         let err = gate.evaluate(input).unwrap_err();
-        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+        assert!(
+            matches!(err, GateRejection::RecipientBindingMismatch),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -933,14 +1004,20 @@ mod tests {
         input.intent.recipient_commitment =
             RecipientCommitment::from_decimal_str(RECIPIENT_COMMITMENT_B).unwrap();
         let err = gate.evaluate(input).unwrap_err();
-        assert!(matches!(err, GateRejection::CommitmentMismatch { .. }), "got {err:?}");
+        assert!(
+            matches!(err, GateRejection::CommitmentMismatch { .. }),
+            "got {err:?}"
+        );
 
         // (b) Wrong subject opening: binding does not re-derive the commitment.
         let (mut input, gate) = valid_gate_input();
         let other = zwa_protocol::SubjectSecret::from_decimal_str(OTHER_SUBJECT_SECRET).unwrap();
         input.recipient_subject_commitment = zwa_commitments::subject_commitment(other);
         let err = gate.evaluate(input).unwrap_err();
-        assert!(matches!(err, GateRejection::RecipientBindingMismatch), "got {err:?}");
+        assert!(
+            matches!(err, GateRejection::RecipientBindingMismatch),
+            "got {err:?}"
+        );
     }
 
     // --- F-07: ordering and persisted state after rejection ---
@@ -952,14 +1029,22 @@ mod tests {
     const TXID_1: SettlementTxId = SettlementTxId::new([0x11; 32]);
 
     fn calls(gate: &TestGate) -> (usize, usize) {
-        (gate.provenance_verifier.calls(), gate.eligibility_verifier.calls())
+        (
+            gate.provenance_verifier.calls(),
+            gate.eligibility_verifier.calls(),
+        )
     }
 
     fn state_of(gate: &TestGate, c: TradeCommitment) -> Option<TradeLifecycleState> {
         gate.replay_store().state(c).unwrap()
     }
 
-    fn issuer_envelope(signer: &SigningKey, version: u64, from: u64, to: u64) -> IssuerRootEnvelope {
+    fn issuer_envelope(
+        signer: &SigningKey,
+        version: u64,
+        from: u64,
+        to: u64,
+    ) -> IssuerRootEnvelope {
         let payload = zwa_credentials::IssuerRootPayload::new(
             AuthorizedIssuanceRoot::from_decimal_str(ISSUANCE_ROOT).unwrap(),
             IssuerKeyId::new(b"issuer-atlas").unwrap(),
@@ -969,10 +1054,18 @@ mod tests {
         )
         .unwrap();
         let sig = signer.sign(&payload.canonical_bytes());
-        zwa_credentials::IssuerRootEnvelope::new(payload, OpaqueSignature::new(&sig.to_bytes()).unwrap())
+        zwa_credentials::IssuerRootEnvelope::new(
+            payload,
+            OpaqueSignature::new(&sig.to_bytes()).unwrap(),
+        )
     }
 
-    fn credential_envelope(signer: &SigningKey, version: u64, from: u64, to: u64) -> CredentialRootEnvelope {
+    fn credential_envelope(
+        signer: &SigningKey,
+        version: u64,
+        from: u64,
+        to: u64,
+    ) -> CredentialRootEnvelope {
         let payload = zwa_credentials::CredentialRootPayload::new(
             ActiveCredentialRoot::from_decimal_str(CREDENTIAL_ROOT).unwrap(),
             AuthorityKeyId::new(b"cred-auth-1").unwrap(),
@@ -982,7 +1075,10 @@ mod tests {
         )
         .unwrap();
         let sig = signer.sign(&payload.canonical_bytes());
-        zwa_credentials::CredentialRootEnvelope::new(payload, OpaqueSignature::new(&sig.to_bytes()).unwrap())
+        zwa_credentials::CredentialRootEnvelope::new(
+            payload,
+            OpaqueSignature::new(&sig.to_bytes()).unwrap(),
+        )
     }
 
     #[test]
@@ -993,7 +1089,11 @@ mod tests {
         let err = gate.evaluate(input).unwrap_err();
         assert!(matches!(err, GateRejection::ProofInvalid(_)), "got {err:?}");
         assert_eq!(state_of(&gate, c), None);
-        assert_eq!(calls(&gate), (1, 0), "eligibility must not run after provenance fails");
+        assert_eq!(
+            calls(&gate),
+            (1, 0),
+            "eligibility must not run after provenance fails"
+        );
     }
 
     #[test]
@@ -1011,7 +1111,8 @@ mod tests {
     fn f07_failed_control_leaves_no_record_and_runs_no_proof() {
         let (mut input, gate) = valid_gate_input();
         let c = input.commitment;
-        input.control_response = RecipientControlResponse::sign(&input.control_challenge, &signing_key(99));
+        input.control_response =
+            RecipientControlResponse::sign(&input.control_challenge, &signing_key(99));
         let err = gate.evaluate(input).unwrap_err();
         assert!(matches!(err, GateRejection::Control(_)), "got {err:?}");
         assert_eq!(state_of(&gate, c), None);
@@ -1023,40 +1124,77 @@ mod tests {
         let now = 1_900_000_100;
         type Mutation = Box<dyn Fn(&mut GateInput)>;
         let cases: Vec<(&str, Mutation)> = vec![
-            ("wrong issuer signer", Box::new(move |i: &mut GateInput| {
-                i.issuer_envelope = issuer_envelope(&signing_key(77), 1, 1_900_000_000, 2_100_000_000);
-            })),
-            ("wrong credential signer", Box::new(move |i: &mut GateInput| {
-                i.credential_envelope = credential_envelope(&signing_key(78), 1, 1_900_000_000, 2_100_000_000);
-            })),
-            ("expired issuer root", Box::new(move |i: &mut GateInput| {
-                i.issuer_envelope = issuer_envelope(&signing_key(1), 1, 1_800_000_000, now - 1);
-            })),
-            ("not-yet-valid issuer root", Box::new(move |i: &mut GateInput| {
-                i.issuer_envelope = issuer_envelope(&signing_key(1), 1, now + 1, 2_100_000_000);
-            })),
-            ("expired credential root", Box::new(move |i: &mut GateInput| {
-                i.credential_envelope = credential_envelope(&signing_key(2), 1, 1_800_000_000, now - 1);
-            })),
-            ("not-yet-valid credential root", Box::new(move |i: &mut GateInput| {
-                i.credential_envelope = credential_envelope(&signing_key(2), 1, now + 1, 2_100_000_000);
-            })),
-            ("stale (superseded) issuer version", Box::new(move |i: &mut GateInput| {
-                i.issuer_envelope = issuer_envelope(&signing_key(1), 2, 1_900_000_000, 2_100_000_000);
-            })),
-            ("stale (superseded) credential version", Box::new(move |i: &mut GateInput| {
-                i.credential_envelope = credential_envelope(&signing_key(2), 2, 1_900_000_000, 2_100_000_000);
-            })),
-            ("root expires before trade", Box::new(move |i: &mut GateInput| {
-                i.issuer_envelope = issuer_envelope(&signing_key(1), 1, 1_900_000_000, 1_999_999_999);
-            })),
+            (
+                "wrong issuer signer",
+                Box::new(move |i: &mut GateInput| {
+                    i.issuer_envelope =
+                        issuer_envelope(&signing_key(77), 1, 1_900_000_000, 2_100_000_000);
+                }),
+            ),
+            (
+                "wrong credential signer",
+                Box::new(move |i: &mut GateInput| {
+                    i.credential_envelope =
+                        credential_envelope(&signing_key(78), 1, 1_900_000_000, 2_100_000_000);
+                }),
+            ),
+            (
+                "expired issuer root",
+                Box::new(move |i: &mut GateInput| {
+                    i.issuer_envelope = issuer_envelope(&signing_key(1), 1, 1_800_000_000, now - 1);
+                }),
+            ),
+            (
+                "not-yet-valid issuer root",
+                Box::new(move |i: &mut GateInput| {
+                    i.issuer_envelope = issuer_envelope(&signing_key(1), 1, now + 1, 2_100_000_000);
+                }),
+            ),
+            (
+                "expired credential root",
+                Box::new(move |i: &mut GateInput| {
+                    i.credential_envelope =
+                        credential_envelope(&signing_key(2), 1, 1_800_000_000, now - 1);
+                }),
+            ),
+            (
+                "not-yet-valid credential root",
+                Box::new(move |i: &mut GateInput| {
+                    i.credential_envelope =
+                        credential_envelope(&signing_key(2), 1, now + 1, 2_100_000_000);
+                }),
+            ),
+            (
+                "stale (superseded) issuer version",
+                Box::new(move |i: &mut GateInput| {
+                    i.issuer_envelope =
+                        issuer_envelope(&signing_key(1), 2, 1_900_000_000, 2_100_000_000);
+                }),
+            ),
+            (
+                "stale (superseded) credential version",
+                Box::new(move |i: &mut GateInput| {
+                    i.credential_envelope =
+                        credential_envelope(&signing_key(2), 2, 1_900_000_000, 2_100_000_000);
+                }),
+            ),
+            (
+                "root expires before trade",
+                Box::new(move |i: &mut GateInput| {
+                    i.issuer_envelope =
+                        issuer_envelope(&signing_key(1), 1, 1_900_000_000, 1_999_999_999);
+                }),
+            ),
         ];
         for (name, mutate) in cases {
             let (mut input, gate) = valid_gate_input();
             let c = input.commitment;
             mutate(&mut input);
             let err = gate.evaluate(input).unwrap_err();
-            assert!(matches!(err, GateRejection::RootAuth(_)), "{name}: got {err:?}");
+            assert!(
+                matches!(err, GateRejection::RootAuth(_)),
+                "{name}: got {err:?}"
+            );
             assert_eq!(state_of(&gate, c), None, "{name}");
             assert_eq!(calls(&gate), (0, 0), "{name}");
         }
@@ -1068,7 +1206,10 @@ mod tests {
         let c = input.commitment;
         input.now = AT_EXPIRY;
         gate.evaluate(input).unwrap();
-        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+        assert_eq!(
+            state_of(&gate, c),
+            Some(TradeLifecycleState::SettlementConstructed)
+        );
     }
 
     #[test]
@@ -1077,7 +1218,10 @@ mod tests {
         let c = input.commitment;
         input.now = AFTER_EXPIRY;
         let err = gate.evaluate(input).unwrap_err();
-        assert!(matches!(err, GateRejection::ExpiredTrade { .. }), "got {err:?}");
+        assert!(
+            matches!(err, GateRejection::ExpiredTrade { .. }),
+            "got {err:?}"
+        );
         assert_eq!(state_of(&gate, c), None);
         assert_eq!(calls(&gate), (0, 0));
     }
@@ -1087,21 +1231,31 @@ mod tests {
         let (input, gate) = valid_gate_input();
         let c = input.commitment;
         gate.evaluate(input).unwrap();
-        gate.replay_store().fail(c, FailureReason::ConstructionFailed).unwrap();
-        gate.replay_store().retry_after_failure(c, None, UnixSeconds::new(1_900_000_200)).unwrap();
+        gate.replay_store()
+            .fail(c, FailureReason::ConstructionFailed)
+            .unwrap();
+        gate.replay_store()
+            .retry_after_failure(c, None, UnixSeconds::new(1_900_000_200))
+            .unwrap();
         assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Created));
 
         let (mut late, _) = valid_gate_input();
         late.now = AFTER_EXPIRY;
         let before = calls(&gate);
         let err = gate.evaluate(late).unwrap_err();
-        assert!(matches!(err, GateRejection::ExpiredTrade { .. }), "got {err:?}");
+        assert!(
+            matches!(err, GateRejection::ExpiredTrade { .. }),
+            "got {err:?}"
+        );
         assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Expired));
         assert_eq!(calls(&gate), before);
 
         // Terminal: even a fully valid, timely request is refused.
         let (again, _) = valid_gate_input();
-        assert!(matches!(gate.evaluate(again).unwrap_err(), GateRejection::AlreadyExpired));
+        assert!(matches!(
+            gate.evaluate(again).unwrap_err(),
+            GateRejection::AlreadyExpired
+        ));
     }
 
     #[test]
@@ -1111,32 +1265,49 @@ mod tests {
         let now = input.now;
         gate.evaluate(input).unwrap();
         gate.replay_store().submit(c, TXID_1, now).unwrap();
-        gate.replay_store().fail(c, FailureReason::SubmissionFailed).unwrap();
+        gate.replay_store()
+            .fail(c, FailureReason::SubmissionFailed)
+            .unwrap();
         let after_first = calls(&gate);
         assert_eq!(after_first, (1, 1));
 
         // The gate never retries by itself (old code auto-acknowledged the txid).
         let (again, _) = valid_gate_input();
-        assert!(matches!(gate.evaluate(again).unwrap_err(), GateRejection::RetryRequired));
+        assert!(matches!(
+            gate.evaluate(again).unwrap_err(),
+            GateRejection::RetryRequired
+        ));
         assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Failed));
         assert_eq!(calls(&gate), after_first);
 
         // Explicit retry needs the exact prior txid.
-        assert!(gate.replay_store().retry_after_failure(c, None, now).is_err());
-        let rec = gate.replay_store().retry_after_failure(c, Some(TXID_1), now).unwrap();
+        assert!(gate
+            .replay_store()
+            .retry_after_failure(c, None, now)
+            .is_err());
+        let rec = gate
+            .replay_store()
+            .retry_after_failure(c, Some(TXID_1), now)
+            .unwrap();
         assert_eq!(rec.state(), TradeLifecycleState::Created);
         assert_eq!(rec.retry_count(), 1);
 
         // CREATED after retry: a failing proof must not produce VERIFIED.
         let (mut bad, _) = valid_gate_input();
         bad.eligibility_proof = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, TRADE_B_COMMITMENT);
-        assert!(matches!(gate.evaluate(bad).unwrap_err(), GateRejection::ProofInvalid(_)));
+        assert!(matches!(
+            gate.evaluate(bad).unwrap_err(),
+            GateRejection::ProofInvalid(_)
+        ));
         assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Created));
 
         // Full re-verification: both proofs run again, then construction.
         let (good, _) = valid_gate_input();
         gate.evaluate(good).unwrap();
-        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+        assert_eq!(
+            state_of(&gate, c),
+            Some(TradeLifecycleState::SettlementConstructed)
+        );
         assert_eq!(calls(&gate), (after_first.0 + 2, after_first.1 + 2));
         let rec = gate.replay_store().get(c).unwrap().unwrap();
         assert_eq!(rec.retry_count(), 1);
@@ -1154,11 +1325,17 @@ mod tests {
 
         let (mut bad, _) = valid_gate_input();
         bad.provenance_proof = fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_B_COMMITMENT);
-        assert!(matches!(gate.evaluate(bad).unwrap_err(), GateRejection::ProofInvalid(_)));
+        assert!(matches!(
+            gate.evaluate(bad).unwrap_err(),
+            GateRejection::ProofInvalid(_)
+        ));
         assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Verified));
 
         gate.evaluate(input).unwrap();
-        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+        assert_eq!(
+            state_of(&gate, c),
+            Some(TradeLifecycleState::SettlementConstructed)
+        );
     }
 
     #[test]
@@ -1168,9 +1345,15 @@ mod tests {
         gate.evaluate(input).unwrap();
         let before = calls(&gate);
         let (again, _) = valid_gate_input();
-        assert!(matches!(gate.evaluate(again).unwrap_err(), GateRejection::IllegalState { .. }));
+        assert!(matches!(
+            gate.evaluate(again).unwrap_err(),
+            GateRejection::IllegalState { .. }
+        ));
         assert_eq!(calls(&gate), before);
-        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::SettlementConstructed));
+        assert_eq!(
+            state_of(&gate, c),
+            Some(TradeLifecycleState::SettlementConstructed)
+        );
     }
 
     #[test]
@@ -1188,28 +1371,69 @@ mod tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "{results:?}");
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "{results:?}"
+        );
     }
 
     #[test]
-    fn approval_gated_replay_api_on_downstream_store() {
+    fn a8r1_old_approval_cannot_relock_after_failed_retry() {
+        // A8-R1: an approval held across FAILED -> retry must not re-lock the
+        // trade; only a full `evaluate` (every check re-run) can.
         let (input, gate) = valid_gate_input();
+        let c = input.commitment;
         let now = input.now;
-        let approval = gate.evaluate(input).unwrap();
-        // A separate (e.g. settlement-side) store can only be driven with the approval.
-        let downstream = PersistentReplayStore::lazy(InMemoryPersistence::new(), 3);
+        let old_approval = gate.evaluate(input).unwrap();
+        gate.replay_store()
+            .fail(c, FailureReason::ConstructionFailed)
+            .unwrap();
+        gate.replay_store()
+            .retry_after_failure(c, None, now)
+            .unwrap();
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Created));
+        let after_first = calls(&gate);
+
+        // Every remaining public store operation leaves the trade unlocked.
+        let store = gate.replay_store();
+        assert!(store.submit(c, TXID_1, now).is_err());
+        assert!(store.confirm(c).is_err());
+        assert!(store.consume(c).is_err());
+        assert_eq!(state_of(&gate, c), Some(TradeLifecycleState::Created));
+        assert_eq!(calls(&gate), after_first);
+
+        // Only a full evaluate re-locks it, and it re-runs both proofs.
+        let (again, _) = valid_gate_input();
+        gate.evaluate(again).unwrap();
         assert_eq!(
-            downstream.create_from_approval(&approval).unwrap().state(),
-            zwa_protocol::lifecycle::TradeLifecycleState::Created
+            state_of(&gate, c),
+            Some(TradeLifecycleState::SettlementConstructed)
         );
-        assert!(downstream.create_from_approval(&approval).is_err(), "duplicate create");
-        downstream.verify_approved(&approval, now).unwrap();
-        let locked = downstream.acquire_construction_approved(&approval, now).unwrap();
-        assert_eq!(locked.state(), zwa_protocol::lifecycle::TradeLifecycleState::SettlementConstructed);
-        assert!(
-            downstream.acquire_construction_approved(&approval, now).is_err(),
-            "construction lock has exactly one winner"
-        );
+        assert_eq!(calls(&gate), (after_first.0 + 1, after_first.1 + 1));
+        assert_eq!(old_approval.commitment(), c);
+    }
+
+    #[test]
+    fn a8r1_no_approval_driven_replay_api_exists() {
+        // Guard against re-introducing a public path to VERIFIED /
+        // SETTLEMENT_CONSTRUCTED that bypasses `MatcherGate::evaluate`.
+        let sources = [
+            ("replay.rs", include_str!("replay.rs")),
+            ("gate.rs", include_str!("gate.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+        ];
+        let banned = [
+            ["fn create_from_", "approval"].concat(),
+            ["fn verify_", "approved"].concat(),
+            ["fn acquire_construction_", "approved"].concat(),
+        ];
+        for (name, src) in sources {
+            let prod = src.find("\nmod tests {").map_or(src, |i| &src[..i]);
+            for b in &banned {
+                assert!(!prod.contains(b.as_str()), "{name} must not contain `{b}`");
+            }
+        }
     }
 
     #[test]
@@ -1230,9 +1454,18 @@ mod tests {
     fn gate_allows_valid_private_trade() {
         let (input, gate) = valid_gate_input();
         let verified = gate.evaluate(input).unwrap();
-        assert_eq!(verified.checked_trade().commitment().to_string(), TRADE_COMMITMENT);
-        assert_eq!(verified.authenticated_issuer_root().root().to_string(), ISSUANCE_ROOT);
-        assert_eq!(verified.authenticated_credential_root().root().to_string(), CREDENTIAL_ROOT);
+        assert_eq!(
+            verified.checked_trade().commitment().to_string(),
+            TRADE_COMMITMENT
+        );
+        assert_eq!(
+            verified.authenticated_issuer_root().root().to_string(),
+            ISSUANCE_ROOT
+        );
+        assert_eq!(
+            verified.authenticated_credential_root().root().to_string(),
+            CREDENTIAL_ROOT
+        );
         // Opaque approval — can get commitment/intent via getters, but cannot Clone or serialize
         assert_eq!(verified.commitment().to_string(), TRADE_COMMITMENT);
     }
@@ -1281,7 +1514,9 @@ mod tests {
         match err {
             GateRejection::IllegalState { .. } => {}
             GateRejection::AlreadyConsumed => {}
-            other => panic!("identical request twice must not create second approval, got {other:?}"),
+            other => {
+                panic!("identical request twice must not create second approval, got {other:?}")
+            }
         }
 
         // Still only one record, still SETTLEMENT_CONSTRUCTED
@@ -1300,7 +1535,10 @@ mod tests {
         // Early failure 1: Commitment mismatch (Step 2) — cheapest gate
         let (mut input, gate) = valid_gate_input();
         let commitment = input.commitment;
-        assert!(gate.replay_store().state(commitment).unwrap().is_none(), "precondition empty");
+        assert!(
+            gate.replay_store().state(commitment).unwrap().is_none(),
+            "precondition empty"
+        );
         input.intent.offered_amount = TradeAmount::new(9999);
         let err = gate.evaluate(input).unwrap_err();
         match err {
@@ -1347,7 +1585,8 @@ mod tests {
         let (mut input3, gate3) = valid_gate_input();
         let commitment3 = input3.commitment;
         let sk_other = signing_key(99);
-        input3.control_response = RecipientControlResponse::sign(&input3.control_challenge, &sk_other);
+        input3.control_response =
+            RecipientControlResponse::sign(&input3.control_challenge, &sk_other);
         let err = gate3.evaluate(input3).unwrap_err();
         match err {
             GateRejection::Control(_) => {}
@@ -1376,7 +1615,11 @@ mod tests {
         // Valid asset, wrong investor class → eligibility proof has wrong public inputs
         let (mut input, gate) = valid_gate_input();
         // Make eligibility proof for different commitment (simulating wrong class proof)
-        let bad_proof = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, "7409670081847436957289371955571360481923983184454289247710022466448715682310");
+        let bad_proof = fake_proof(
+            ELIG_LABEL,
+            CREDENTIAL_ROOT,
+            "7409670081847436957289371955571360481923983184454289247710022466448715682310",
+        );
         input.eligibility_proof = bad_proof;
         let err = gate.evaluate(input).unwrap_err();
         match err {
@@ -1391,7 +1634,8 @@ mod tests {
         let (mut input, gate) = valid_gate_input();
         let recv_b = OrchardReceiverBytes::from_hex(RECEIVER_B_HEX).unwrap();
         // Challenge for B, but approved is A
-        let commitment_b = zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
+        let commitment_b =
+            zwa_protocol::TradeCommitment::from_decimal_str(TRADE_COMMITMENT).unwrap();
         let challenge_b = RecipientControlChallenge::new(
             recv_b,
             [8u8; 32],
@@ -1399,7 +1643,8 @@ mod tests {
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
             commitment_b,
-        ).unwrap();
+        )
+        .unwrap();
         let sk_b = signing_key(9);
         let response_b = RecipientControlResponse::sign(&challenge_b, &sk_b);
         input.control_challenge = challenge_b;
@@ -1449,9 +1694,13 @@ mod tests {
             RootVersion::new(2),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
-        ).unwrap();
+        )
+        .unwrap();
         let sig = sk_issuer.sign(&issuer_payload_v2.canonical_bytes());
-        let envelope_v2 = zwa_credentials::IssuerRootEnvelope::new(issuer_payload_v2, OpaqueSignature::new(&sig.to_bytes()).unwrap());
+        let envelope_v2 = zwa_credentials::IssuerRootEnvelope::new(
+            issuer_payload_v2,
+            OpaqueSignature::new(&sig.to_bytes()).unwrap(),
+        );
         input2.issuer_envelope = envelope_v2;
         let err = gate2.evaluate(input2).unwrap_err();
         match err {
@@ -1464,7 +1713,11 @@ mod tests {
     fn gate_blocks_proof_splicing_from_different_trades() {
         // Proof A from trade A, proof B from trade B with different commitment → must fail
         let (mut input, gate) = valid_gate_input();
-        let spliced_elig = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, "4141140993944283635059564795814979270169431233615041812756992202222578526061");
+        let spliced_elig = fake_proof(
+            ELIG_LABEL,
+            CREDENTIAL_ROOT,
+            "4141140993944283635059564795814979270169431233615041812756992202222578526061",
+        );
         input.eligibility_proof = spliced_elig;
         let err = gate.evaluate(input).unwrap_err();
         match err {
@@ -1519,7 +1772,8 @@ mod tests {
             RootVersion::new(1),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
-        ).unwrap();
+        )
+        .unwrap();
         let sig = sk_issuer.sign(&issuer_payload.canonical_bytes());
         let issuer_envelope = zwa_credentials::IssuerRootEnvelope::new(
             issuer_payload,
@@ -1537,7 +1791,8 @@ mod tests {
             RootVersion::new(1),
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
-        ).unwrap();
+        )
+        .unwrap();
         let sig2 = sk_cred.sign(&cred_payload.canonical_bytes());
         let cred_envelope = zwa_credentials::CredentialRootEnvelope::new(
             cred_payload,
@@ -1548,7 +1803,10 @@ mod tests {
         let recv_a = OrchardReceiverBytes::from_hex(RECEIVER_A_HEX).unwrap();
         let mut approved_control = BTreeMap::new();
         approved_control.insert(recv_a, vk_control);
-        let control_auth = crate::control::RecipientControlAuthenticator::new(approved_control, CONTROL_DOMAIN.to_vec());
+        let control_auth = crate::control::RecipientControlAuthenticator::new(
+            approved_control,
+            CONTROL_DOMAIN.to_vec(),
+        );
         let persistence = JsonFilePersistence::new(&path).unwrap();
         let replay = PersistentReplayStore::new(persistence, 3).unwrap();
         let gate = MatcherGate::new(
@@ -1567,7 +1825,8 @@ mod tests {
             UnixSeconds::new(1_900_000_000),
             UnixSeconds::new(2_100_000_000),
             commitment,
-        ).unwrap();
+        )
+        .unwrap();
         let response = RecipientControlResponse::sign(&challenge, &sk_control);
         let prov_proof = fake_proof(PROV_LABEL, ISSUANCE_ROOT, TRADE_COMMITMENT);
         let elig_proof = fake_proof(ELIG_LABEL, CREDENTIAL_ROOT, TRADE_COMMITMENT);
@@ -1605,10 +1864,12 @@ mod tests {
         let prov_backend = ProvenanceVerifierBackend::from_fixture().unwrap();
         let prov_root = AuthorizedIssuanceRoot::from_decimal_str(
             "8857867840332676380575934803462643968319857770249975039236308904195120230546",
-        ).unwrap();
+        )
+        .unwrap();
         let prov_commitment = zwa_protocol::TradeCommitment::from_decimal_str(
             "7409670081847436957289371955571360481923983184454289247710022466448715682310",
-        ).unwrap();
+        )
+        .unwrap();
         let prov_proof_bytes = include_str!("../../tests/fixtures/groth16/provenance-proof.json");
         let prov_proof = OpaqueProof::new(prov_proof_bytes.as_bytes()).unwrap();
         let prov_result = prov_backend.verify(prov_root, prov_commitment, &prov_proof);
@@ -1616,10 +1877,12 @@ mod tests {
         let elig_backend = EligibilityVerifierBackend::from_fixture().unwrap();
         let elig_root = ActiveCredentialRoot::from_decimal_str(
             "7721491042898277899686830032817687831050368809629386580479309633507500868506",
-        ).unwrap();
+        )
+        .unwrap();
         let elig_commitment = zwa_protocol::TradeCommitment::from_decimal_str(
             "10187400613857124614980227259922066295752635539032972479692659299555113110306",
-        ).unwrap();
+        )
+        .unwrap();
         let elig_proof_bytes = include_str!("../../tests/fixtures/groth16/eligibility-proof.json");
         let elig_proof = OpaqueProof::new(elig_proof_bytes.as_bytes()).unwrap();
         let elig_result = elig_backend.verify(elig_root, elig_commitment, &elig_proof);

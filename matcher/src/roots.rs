@@ -217,12 +217,11 @@ impl IssuerRootAuthenticator {
 
         // 4. Approved key lookup.
         let issuer_id = envelope.payload().issuer_id();
-        let verifying_key = self
-            .approved_keys
-            .get(issuer_id)
-            .ok_or_else(|| RootAuthError::IssuerKeyNotApproved {
+        let verifying_key = self.approved_keys.get(issuer_id).ok_or_else(|| {
+            RootAuthError::IssuerKeyNotApproved {
                 id: issuer_id.as_bytes().to_vec(),
-            })?;
+            }
+        })?;
 
         // 5. Signature verification over frozen canonical payload.
         verify_ed25519_signature(
@@ -308,12 +307,11 @@ impl CredentialRootAuthenticator {
         }
 
         let authority_id = envelope.payload().authority_id();
-        let verifying_key = self
-            .approved_keys
-            .get(authority_id)
-            .ok_or_else(|| RootAuthError::AuthorityKeyNotApproved {
+        let verifying_key = self.approved_keys.get(authority_id).ok_or_else(|| {
+            RootAuthError::AuthorityKeyNotApproved {
                 id: authority_id.as_bytes().to_vec(),
-            })?;
+            }
+        })?;
 
         verify_ed25519_signature(
             verifying_key,
@@ -371,19 +369,20 @@ fn verify_ed25519_signature(
         });
     }
 
-    let sig_array: [u8; 64] = signature_bytes
-        .try_into()
-        .map_err(|_| RootAuthError::InvalidSignatureEncoding {
-            got: signature_bytes.len(),
-        })?;
+    let sig_array: [u8; 64] =
+        signature_bytes
+            .try_into()
+            .map_err(|_| RootAuthError::InvalidSignatureEncoding {
+                got: signature_bytes.len(),
+            })?;
 
     let signature = Signature::from_bytes(&sig_array);
 
-    verifying_key
-        .verify(message, &signature)
-        .map_err(|_| RootAuthError::SignatureVerificationFailed {
+    verifying_key.verify(message, &signature).map_err(|_| {
+        RootAuthError::SignatureVerificationFailed {
             key_id: key_id.to_vec(),
-        })?;
+        }
+    })?;
 
     Ok(())
 }
@@ -456,7 +455,8 @@ mod tests {
 
         let auth = IssuerRootAuthenticator::new(approved, RootVersion::new(1));
 
-        let envelope = issuer_envelope_with_sig(&sk, b"issuer-atlas", 1, 1_900_000_000, 2_100_000_000);
+        let envelope =
+            issuer_envelope_with_sig(&sk, b"issuer-atlas", 1, 1_900_000_000, 2_100_000_000);
 
         let now = UnixSeconds::new(2_000_000_000);
         let trade_expiry = TradeExpiry::new(2_000_000_000);
@@ -476,7 +476,8 @@ mod tests {
 
         // Current version is 2, but envelope is version 1 — stale-but-signed must be rejected.
         let auth = IssuerRootAuthenticator::new(approved, RootVersion::new(2));
-        let envelope = issuer_envelope_with_sig(&sk, b"issuer-atlas", 1, 1_900_000_000, 2_100_000_000);
+        let envelope =
+            issuer_envelope_with_sig(&sk, b"issuer-atlas", 1, 1_900_000_000, 2_100_000_000);
 
         let now = UnixSeconds::new(2_000_000_000);
         let trade_expiry = TradeExpiry::new(2_000_000_000);
@@ -502,7 +503,8 @@ mod tests {
         let auth = IssuerRootAuthenticator::new(approved, RootVersion::new(1));
 
         // Envelope signed by same key but claims different issuer id — not in approved map.
-        let envelope = issuer_envelope_with_sig(&sk, b"issuer-other", 1, 1_900_000_000, 2_100_000_000);
+        let envelope =
+            issuer_envelope_with_sig(&sk, b"issuer-other", 1, 1_900_000_000, 2_100_000_000);
 
         let now = UnixSeconds::new(2_000_000_000);
         let trade_expiry = TradeExpiry::new(2_000_000_000);
@@ -525,7 +527,8 @@ mod tests {
         approved.insert(issuer_id, vk);
         let auth = IssuerRootAuthenticator::new(approved, RootVersion::new(1));
 
-        let envelope = issuer_envelope_with_sig(&sk, b"issuer-atlas", 1, 1_900_000_000, 2_100_000_000);
+        let envelope =
+            issuer_envelope_with_sig(&sk, b"issuer-atlas", 1, 1_900_000_000, 2_100_000_000);
 
         // Not yet valid.
         let err = auth
@@ -627,13 +630,8 @@ mod tests {
         let mut approved_auth = BTreeMap::new();
         approved_auth.insert(authority_id, vk_auth);
         let cred_auth = CredentialRootAuthenticator::new(approved_auth, RootVersion::new(1));
-        let cred_env = credential_envelope_with_sig(
-            &sk_auth,
-            b"cred-auth-1",
-            1,
-            1_900_000_000,
-            2_050_000_000,
-        );
+        let cred_env =
+            credential_envelope_with_sig(&sk_auth, b"cred-auth-1", 1, 1_900_000_000, 2_050_000_000);
 
         let now = UnixSeconds::new(2_000_000_000);
         let trade_expiry_ok = TradeExpiry::new(2_000_000_000);
@@ -661,8 +659,8 @@ mod tests {
 
         // If we authenticate with ok expiry, then combined with later expiry should fail.
         let trade_expiry_late = TradeExpiry::new(2_080_000_000);
-        let err = check_combined_root_expiry(trade_expiry_late, &auth_issuer, &auth_cred)
-            .unwrap_err();
+        let err =
+            check_combined_root_expiry(trade_expiry_late, &auth_issuer, &auth_cred).unwrap_err();
         match err {
             RootAuthError::CombinedExpiryViolation {
                 trade_expiry,
@@ -690,10 +688,13 @@ mod tests {
         let canonical = payload.canonical_bytes();
         assert_eq!(&canonical[..8], b"ZWA1ROOT");
         assert_eq!(canonical[8], 1); // kind issuer
-        // Version 1 BE
+                                     // Version 1 BE
         assert_eq!(&canonical[9..17], &1u64.to_be_bytes());
         // id_len + id + root 32B at end
-        assert_eq!(canonical.len(), 8 + 1 + 8 * 3 + 1 + b"issuer-atlas".len() + 32);
+        assert_eq!(
+            canonical.len(),
+            8 + 1 + 8 * 3 + 1 + b"issuer-atlas".len() + 32
+        );
     }
 
     fn hex_decode(s: &str) -> Vec<u8> {
@@ -868,10 +869,7 @@ mod tests {
         let mut sig_bytes = sig.to_bytes().to_vec();
         sig_bytes.truncate(32); // truncated — must be rejected as InvalidSignatureEncoding
 
-        let envelope = IssuerRootEnvelope::new(
-            payload,
-            OpaqueSignature::new(&sig_bytes).unwrap(),
-        );
+        let envelope = IssuerRootEnvelope::new(payload, OpaqueSignature::new(&sig_bytes).unwrap());
 
         let err = auth
             .authenticate(
@@ -916,7 +914,8 @@ mod tests {
 
         // Envelope with wrong key id must fail — proves you cannot fabricate Authenticated root
         // without going through approved key lookup + sig verification.
-        let invalid = issuer_envelope_with_sig(&sk, b"issuer-other", 1, 1_900_000_000, 2_100_000_000);
+        let invalid =
+            issuer_envelope_with_sig(&sk, b"issuer-other", 1, 1_900_000_000, 2_100_000_000);
         assert!(auth
             .authenticate(
                 &invalid,

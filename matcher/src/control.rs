@@ -111,16 +111,15 @@ impl RecipientControlChallenge {
         ttl_seconds: u64,
         domain: Vec<u8>,
     ) -> Result<Self, ControlError> {
-        let expiry = issued_at
-            .checked_add_seconds(ttl_seconds)
-            .map_err(|_| ControlError::InvalidWindow {
+        let expiry = issued_at.checked_add_seconds(ttl_seconds).map_err(|_| {
+            ControlError::InvalidWindow {
                 issued_at: issued_at.get(),
                 expiry: u64::MAX,
-            })?;
+            }
+        })?;
 
         let mut nonce = [0u8; 32];
-        getrandom::getrandom(&mut nonce)
-            .map_err(|e| ControlError::RngFailure(format!("{e}")))?;
+        getrandom::getrandom(&mut nonce).map_err(|e| ControlError::RngFailure(format!("{e}")))?;
 
         Self::new(receiver, nonce, domain, issued_at, expiry, trade_commitment)
     }
@@ -587,10 +586,11 @@ impl RecipientControlVerifier for RecipientControlAuthenticator {
 
         // 7. Signature verification over frozen canonical bytes (includes trade_commitment).
         let sig = Signature::from_bytes(response.signature());
-        vk.verify(&challenge.canonical_bytes(), &sig)
-            .map_err(|_| ControlError::SignatureVerificationFailed {
+        vk.verify(&challenge.canonical_bytes(), &sig).map_err(|_| {
+            ControlError::SignatureVerificationFailed {
                 receiver: *challenge.receiver(),
-            })?;
+            }
+        })?;
 
         Ok(VerifiedRecipientControl {
             receiver: *challenge.receiver(),
@@ -713,16 +713,19 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [7u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response = RecipientControlResponse::sign(&challenge, &sk);
 
         let now = UnixSeconds::new(1_900_000_100);
         let verified = auth.verify(&challenge, &response, now).unwrap();
         assert_eq!(verified.receiver(), &recv_a);
-        assert_eq!(
-            verified.receiver_commitment(),
-            receiver_commitment(&recv_a)
-        );
+        assert_eq!(verified.receiver_commitment(), receiver_commitment(&recv_a));
         assert_eq!(verified.trade_commitment(), trade_commitment());
 
         // Also passes against approved receiver check (Phase 1B binding).
@@ -746,7 +749,13 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [8u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response = RecipientControlResponse::sign(&challenge, &sk);
 
         let now = UnixSeconds::new(1_900_000_100);
@@ -778,9 +787,21 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [9u8; 32];
-        let challenge_a = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge_a = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response_b = RecipientControlResponse::sign(
-            &challenge_for(recv_b, nonce, 1_900_000_000, 1_900_000_300, trade_commitment()),
+            &challenge_for(
+                recv_b,
+                nonce,
+                1_900_000_000,
+                1_900_000_300,
+                trade_commitment(),
+            ),
             &sk_b,
         );
 
@@ -799,7 +820,13 @@ mod tests {
         }
 
         // Approved receiver check: credential approves A, but challenge is for B → blocked.
-        let challenge_b = challenge_for(recv_b, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge_b = challenge_for(
+            recv_b,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response_b2 = RecipientControlResponse::sign(&challenge_b, &sk_b);
         let err = auth
             .verify_against_approved_receiver(&challenge_b, &response_b2, &recv_a, now)
@@ -820,16 +847,18 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [10u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_100, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_100,
+            trade_commitment(),
+        );
         let response = RecipientControlResponse::sign(&challenge, &sk);
 
         // Expired.
         let err = auth
-            .verify(
-                &challenge,
-                &response,
-                UnixSeconds::new(1_900_000_101),
-            )
+            .verify(&challenge, &response, UnixSeconds::new(1_900_000_101))
             .unwrap_err();
         match err {
             ControlError::ChallengeExpired { .. } => {}
@@ -838,11 +867,7 @@ mod tests {
 
         // Issued in future.
         let err = auth
-            .verify(
-                &challenge,
-                &response,
-                UnixSeconds::new(1_899_999_999),
-            )
+            .verify(&challenge, &response, UnixSeconds::new(1_899_999_999))
             .unwrap_err();
         match err {
             ControlError::ChallengeIssuedInFuture { .. } => {}
@@ -898,17 +923,19 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [11u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_100, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_100,
+            trade_commitment(),
+        );
         let mut response = RecipientControlResponse::sign(&challenge, &sk);
         // Tamper signature.
         response.signature[0] ^= 1;
 
         let err = auth
-            .verify(
-                &challenge,
-                &response,
-                UnixSeconds::new(1_900_000_050),
-            )
+            .verify(&challenge, &response, UnixSeconds::new(1_900_000_050))
             .unwrap_err();
         match err {
             ControlError::SignatureVerificationFailed { .. } => {}
@@ -917,8 +944,8 @@ mod tests {
 
         // Trade expiry beyond challenge expiry.
         let trade_expiry = zwa_protocol::numbers::TradeExpiry::new(1_900_000_200);
-        let err =
-            RecipientControlAuthenticator::check_trade_expiry(trade_expiry, &challenge).unwrap_err();
+        let err = RecipientControlAuthenticator::check_trade_expiry(trade_expiry, &challenge)
+            .unwrap_err();
         match err {
             ControlError::TradeExpiryBeyondChallengeExpiry {
                 trade_expiry: te,
@@ -935,7 +962,13 @@ mod tests {
     fn canonical_bytes_include_all_fields() {
         let recv_a = receiver_a();
         let nonce = [12u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let bytes = challenge.canonical_bytes();
         // domain || nonce || issued_at BE || expiry BE || receiver 43B || trade_commitment 32B
         assert!(bytes.starts_with(CONTROL_DOMAIN));
@@ -956,7 +989,13 @@ mod tests {
         assert_ne!(challenge.canonical_bytes(), challenge2.canonical_bytes());
 
         // Changing trade commitment changes canonical bytes
-        let challenge3 = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, other_commitment());
+        let challenge3 = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            other_commitment(),
+        );
         assert_ne!(challenge.canonical_bytes(), challenge3.canonical_bytes());
     }
 
@@ -970,7 +1009,13 @@ mod tests {
         let auth = RecipientControlAuthenticator::new(approved, CONTROL_DOMAIN.to_vec());
 
         let nonce = [13u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response = RecipientControlResponse::sign(&challenge, &sk);
 
         // Valid
@@ -978,12 +1023,8 @@ mod tests {
         assert!(auth.verify(&challenge, &response, now).is_ok());
 
         // Response with different trade commitment should fail
-        let bad_response = RecipientControlResponse::new(
-            nonce,
-            recv_a,
-            other_commitment(),
-            response.signature,
-        );
+        let bad_response =
+            RecipientControlResponse::new(nonce, recv_a, other_commitment(), response.signature);
         let err = auth.verify(&challenge, &bad_response, now).unwrap_err();
         match err {
             ControlError::TradeCommitmentMismatch { .. } => {}
@@ -991,8 +1032,9 @@ mod tests {
         }
 
         // Challenge trade commitment mismatch vs expected
-        let err = RecipientControlAuthenticator::check_trade_commitment(other_commitment(), &challenge)
-            .unwrap_err();
+        let err =
+            RecipientControlAuthenticator::check_trade_commitment(other_commitment(), &challenge)
+                .unwrap_err();
         match err {
             ControlError::ChallengeTradeCommitmentMismatch { .. } => {}
             other => panic!("expected ChallengeTradeCommitmentMismatch, got {other:?}"),
@@ -1003,7 +1045,13 @@ mod tests {
     fn unconfigured_verifier_fail_closed() {
         let recv_a = receiver_a();
         let nonce = [14u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response = RecipientControlResponse::new(nonce, recv_a, trade_commitment(), [0u8; 64]);
 
         let unconfigured = UnconfiguredControlVerifier;
@@ -1020,7 +1068,13 @@ mod tests {
     fn fake_verifier_only_in_test() {
         let recv_a = receiver_a();
         let nonce = [15u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response = RecipientControlResponse::new(nonce, recv_a, trade_commitment(), [0u8; 64]);
 
         let fake = FakeControlVerifier;
@@ -1043,7 +1097,13 @@ mod tests {
 
         let boxed: Box<dyn RecipientControlVerifier> = Box::new(real_auth);
         let nonce = [16u8; 32];
-        let challenge = challenge_for(recv_a, nonce, 1_900_000_000, 1_900_000_300, trade_commitment());
+        let challenge = challenge_for(
+            recv_a,
+            nonce,
+            1_900_000_000,
+            1_900_000_300,
+            trade_commitment(),
+        );
         let response = RecipientControlResponse::sign(&challenge, &sk);
         let verified = boxed
             .verify(&challenge, &response, UnixSeconds::new(1_900_000_100))
