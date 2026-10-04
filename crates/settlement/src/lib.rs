@@ -30,6 +30,103 @@
 //! replay coordinator, zcash adapter) is archived, not compiled, under
 //! `archive/m4-prototype/`.
 //!
+//! # Handoff integrity, checked by the compiler (M3-T1)
+//!
+//! External code cannot build, copy, default or deserialize an M2 approval,
+//! an M3 settlement or its verified evidence. Each `compile_fail` block has a
+//! compiling twin below that differs only in the forbidden expression, so the
+//! blocks fail for the stated reason and not because a path is wrong.
+//!
+//! Struct literals and `..base` updates are rejected (private fields):
+//!
+//! ```compile_fail,E0451
+//! fn forge(a: zwa_matcher::MatcherApproval) -> zwa_matcher::MatcherApproval {
+//!     zwa_matcher::MatcherApproval { ..a }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use zwa_settlement::ApprovedSettlement;
+//! fn forge(s: ApprovedSettlement) -> ApprovedSettlement {
+//!     ApprovedSettlement { ..s }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use zwa_settlement::AttestedPartyIdentity;
+//! fn forge(i: AttestedPartyIdentity) -> AttestedPartyIdentity {
+//!     AttestedPartyIdentity { ..i }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use zwa_settlement::VerifiedPartyAuthorization;
+//! fn forge(v: VerifiedPartyAuthorization) -> VerifiedPartyAuthorization {
+//!     VerifiedPartyAuthorization { ..v }
+//! }
+//! ```
+//!
+//! ```compile_fail,E0451
+//! use zwa_settlement::PartyAttestationTrustRoot;
+//! fn forge(r: PartyAttestationTrustRoot) -> PartyAttestationTrustRoot {
+//!     PartyAttestationTrustRoot { ..r }
+//! }
+//! ```
+//!
+//! The same signatures without the literal compile:
+//!
+//! ```
+//! use zwa_matcher::MatcherApproval;
+//! use zwa_settlement::{
+//!     ApprovedSettlement, AttestedPartyIdentity, PartyAttestationTrustRoot,
+//!     VerifiedPartyAuthorization,
+//! };
+//! fn pass_a(a: MatcherApproval) -> MatcherApproval { a }
+//! fn pass_s(s: ApprovedSettlement) -> ApprovedSettlement { s }
+//! fn pass_i(i: AttestedPartyIdentity) -> AttestedPartyIdentity { i }
+//! fn pass_v(v: VerifiedPartyAuthorization) -> VerifiedPartyAuthorization { v }
+//! fn pass_r(r: PartyAttestationTrustRoot) -> PartyAttestationTrustRoot { r }
+//! ```
+//!
+//! `ApprovedSettlement` and `MatcherApproval` are not `Clone`, not `Default`
+//! and not deserializable:
+//!
+//! ```compile_fail,E0277
+//! fn need_clone<T: Clone>() {}
+//! need_clone::<zwa_settlement::ApprovedSettlement>();
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn need_clone<T: Clone>() {}
+//! need_clone::<zwa_matcher::MatcherApproval>();
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn need_default<T: Default>() {}
+//! need_default::<zwa_settlement::ApprovedSettlement>();
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn need_de<T: serde::de::DeserializeOwned>() {}
+//! need_de::<zwa_settlement::ApprovedSettlement>();
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn need_de<T: serde::de::DeserializeOwned>() {}
+//! need_de::<zwa_matcher::MatcherApproval>();
+//! ```
+//!
+//! The same helpers accept types that do implement the traits:
+//!
+//! ```
+//! fn need_clone<T: Clone>() {}
+//! fn need_default<T: Default>() {}
+//! fn need_de<T: serde::de::DeserializeOwned>() {}
+//! need_clone::<zwa_settlement::RfqRequest>();
+//! need_default::<zwa_settlement::PartyAttestationTrustRoot>();
+//! need_de::<String>();
+//! ```
+//!
 //! # Dependencies on M2
 //!
 //! Only public M2 types are used: `MatcherApproval::{commitment, intent,

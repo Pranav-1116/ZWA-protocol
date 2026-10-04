@@ -18,6 +18,8 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 zwa-credentials = { path = "../credentials", version = "0.1.0" }
+# Compile-fail doctests only: prove ApprovedSettlement is not deserializable.
+serde = "1.0"
 
 [lints]
 workspace = true
