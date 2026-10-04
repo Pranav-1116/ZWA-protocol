@@ -95,8 +95,7 @@ use crate::attestation::{
     attestation_message, AuthorityId, PartyAttestationTrustRoot, PartyId, PartyKeyAttestation,
 };
 use crate::party_auth::{
-    ExpectedParties, PartyAuthorization, PartyAuthorizationRequest, PartyRole,
-    PartyVerificationKey, RegisteredPartyKeys,
+    PartyAuthorization, PartyAuthorizationRequest, PartyRole, PartyVerificationKey,
 };
 use crate::rfq::RfqRequest;
 
@@ -370,17 +369,4 @@ pub(crate) fn approval_for(intent: &TradeIntent) -> MatcherApproval {
         now: UnixSeconds::new(T_NOW),
     })
     .expect("M2 gate must approve the fixture trade")
-}
-
-/// Registry with the independently known seller/buyer keys for each intent.
-pub(crate) fn registry_for(intents: &[TradeIntent]) -> RegisteredPartyKeys {
-    let mut registry = RegisteredPartyKeys::new();
-    let parties =
-        ExpectedParties::new(party_key(SELLER_SEED), party_key(BUYER_SEED)).expect("distinct");
-    for intent in intents {
-        registry
-            .register(zwa_commitments::trade::trade_commitment_v1(intent), parties)
-            .expect("register");
-    }
-    registry
 }

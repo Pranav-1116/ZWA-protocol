@@ -2,10 +2,16 @@
 //!
 //! ```text
 //! MatcherApproval (M2, consumed) + negotiated RfqRequest
+//!   + seller PartyKeyAttestation + buyer PartyKeyAttestation
+//!     (verified against the configured PartyAttestationTrustRoot)
 //!   + seller PartyAuthorization + buyer PartyAuthorization
-//!   + expected keys from an independent PartyIdentitySource
+//!     (each signed by the attested key for its role)
 //!         ── SettlementAuthorizer::approve ──▶ ApprovedSettlement ──▶ M4
 //! ```
+//!
+//! M3 verifies credential-authority-attested party consent for the exact
+//! M2-approved trade. M3 does not hold spending authority. M4 requires each
+//! party's wallet to authorize its own Zcash spend.
 //!
 //! M3 stops here. It constructs, signs, submits and confirms nothing on Zcash.
 
@@ -15,16 +21,21 @@ use zwa_protocol::bytes::{AssetBaseBytes, OrchardReceiverBytes};
 use zwa_protocol::numbers::{TradeAmount, TradeExpiry, TradeNonce, UnixSeconds, ZatoshiAmount};
 use zwa_protocol::{PolicyRoot, RecipientCommitment, TradeCommitment, TradeIntent};
 
+use crate::attestation::{
+    AttestationError, AttestedPartyIdentity, PartyAttestationTrustRoot, PartyKeyAttestation,
+};
 use crate::party_auth::{
-    verify_party_authorization, PartyAuthError, PartyAuthorization, PartyAuthorizationRequest,
-    PartyIdentitySource, PartyRole, VerifiedPartyAuthorization,
+    verify_party_authorization, ExpectedParties, PartyAuthError, PartyAuthorization,
+    PartyAuthorizationRequest, PartyRole, VerifiedPartyAuthorization,
 };
 use crate::rfq::RfqRequest;
 
 /// Domain tag of the handoff digest.
 pub const APPROVED_SETTLEMENT_DOMAIN: &[u8] = b"ZWA1APPROVEDSETTLEMENT";
 /// Version byte of the handoff digest.
-pub const APPROVED_SETTLEMENT_VERSION: u8 = 1;
+///
+/// Version 2 adds the authority-attested party identities (DR-M3-01).
+pub const APPROVED_SETTLEMENT_VERSION: u8 = 2;
 
 /// Reasons `approve` refuses to produce an `ApprovedSettlement` (fail closed).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -56,8 +67,18 @@ pub enum ApprovalError {
     /// No buyer authorization submitted.
     #[error("buyer authorization missing")]
     MissingBuyerAuthorization,
-    /// The identity source could not supply the expected keys.
-    #[error("expected party keys unavailable: {0}")]
+    /// The seller's party-key attestation was rejected.
+    #[error("seller party-key attestation rejected: {0}")]
+    SellerAttestation(AttestationError),
+    /// The buyer's party-key attestation was rejected.
+    #[error("buyer party-key attestation rejected: {0}")]
+    BuyerAttestation(AttestationError),
+    /// Both attestations name the same party id.
+    #[error("seller and buyer attestations name the same party")]
+    SamePartyForBothRoles,
+    /// The attested keys cannot form a valid seller/buyer pair (for example
+    /// both attestations carry the same key).
+    #[error("attested party keys are unusable: {0}")]
     Identity(PartyAuthError),
     /// The seller authorization was rejected.
     #[error("seller authorization rejected: {0}")]
@@ -73,35 +94,38 @@ pub enum ApprovalError {
     },
 }
 
-/// One party's submission: the request the server issued plus what the party
-/// returned.
+/// One party's submission: the request the server issued, the party's
+/// authority-signed key attestation and the party's returned authorization.
 #[derive(Debug, Clone, Copy)]
 pub struct PartySubmission<'a> {
+    /// Authority-signed attestation of this party's authorization key.
+    pub attestation: &'a PartyKeyAttestation,
     /// The request the server issued (server-side record, not client data).
     pub issued: &'a PartyAuthorizationRequest,
     /// The party's returned authorization.
     pub authorization: &'a PartyAuthorization,
 }
 
-/// Produces `ApprovedSettlement`s. Holds only the independent identity source:
-/// no keys, no replay state, no settlement adapter.
+/// Produces `ApprovedSettlement`s. Holds only the operator-configured
+/// party-key trust root (public authority keys): no private keys, no replay
+/// state, no settlement adapter.
 #[derive(Debug, Clone)]
-pub struct SettlementAuthorizer<S> {
-    identity: S,
+pub struct SettlementAuthorizer {
+    trust_root: PartyAttestationTrustRoot,
 }
 
-impl<S: PartyIdentitySource> SettlementAuthorizer<S> {
-    /// Authorizer backed by `identity` (use `UnconfiguredPartyIdentitySource`
-    /// to fail closed).
+impl SettlementAuthorizer {
+    /// Authorizer that accepts party keys attested by an authority in
+    /// `trust_root`. An empty trust root fails closed.
     #[must_use]
-    pub const fn new(identity: S) -> Self {
-        Self { identity }
+    pub const fn new(trust_root: PartyAttestationTrustRoot) -> Self {
+        Self { trust_root }
     }
 
-    /// The identity source.
+    /// The configured party-key trust root.
     #[must_use]
-    pub const fn identity(&self) -> &S {
-        &self.identity
+    pub const fn trust_root(&self) -> &PartyAttestationTrustRoot {
+        &self.trust_root
     }
 
     /// The only way to obtain an [`ApprovedSettlement`].
@@ -114,9 +138,11 @@ impl<S: PartyIdentitySource> SettlementAuthorizer<S> {
     /// 2. the negotiated `terms` equal the approved intent exactly;
     /// 3. the trade is not expired (`now > expiry`);
     /// 4. both submissions are present;
-    /// 5. the expected seller and buyer keys come from the identity source;
-    /// 6. the seller submission is a `Seller` request for this trade, signed by
-    ///    the expected seller key; the buyer submission likewise.
+    /// 5. the seller attestation verifies against the trust root for the
+    ///    `Seller` role at `now`, then the buyer attestation for `Buyer`;
+    /// 6. the two attestations name different parties and different keys;
+    /// 7. the seller submission is a `Seller` request for this trade, signed by
+    ///    the attested seller key; the buyer submission likewise.
     ///
     /// # Errors
     ///
@@ -158,10 +184,21 @@ impl<S: PartyIdentitySource> SettlementAuthorizer<S> {
         let seller = seller.ok_or(ApprovalError::MissingSellerAuthorization)?;
         let buyer = buyer.ok_or(ApprovalError::MissingBuyerAuthorization)?;
 
-        let expected = self
-            .identity
-            .expected_parties(trade_commitment)
-            .map_err(ApprovalError::Identity)?;
+        let seller_identity = self
+            .trust_root
+            .verify(seller.attestation, PartyRole::Seller, now)
+            .map_err(ApprovalError::SellerAttestation)?;
+        let buyer_identity = self
+            .trust_root
+            .verify(buyer.attestation, PartyRole::Buyer, now)
+            .map_err(ApprovalError::BuyerAttestation)?;
+        if seller_identity.party() == buyer_identity.party() {
+            return Err(ApprovalError::SamePartyForBothRoles);
+        }
+        // The expected keys come only from the verified attestations.
+        let expected =
+            ExpectedParties::new(*seller_identity.party_key(), *buyer_identity.party_key())
+                .map_err(ApprovalError::Identity)?;
 
         let seller_evidence =
             verify_slot(PartyRole::Seller, trade_commitment, seller, &expected, now)
@@ -173,14 +210,18 @@ impl<S: PartyIdentitySource> SettlementAuthorizer<S> {
             trade_commitment,
             &settlement_receiver,
             now,
-            &seller_evidence,
-            &buyer_evidence,
+            [
+                (&seller_identity, &seller_evidence),
+                (&buyer_identity, &buyer_evidence),
+            ],
         );
         // The M2 approval is dropped here: M4 receives a snapshot, not matcher state.
         Ok(ApprovedSettlement {
             trade_commitment,
             intent,
             settlement_receiver,
+            seller_identity,
+            buyer_identity,
             seller_authorization: seller_evidence,
             buyer_authorization: buyer_evidence,
             approved_at: now,
@@ -195,7 +236,7 @@ fn verify_slot(
     role: PartyRole,
     trade_commitment: TradeCommitment,
     submission: PartySubmission<'_>,
-    expected: &crate::party_auth::ExpectedParties,
+    expected: &ExpectedParties,
     now: UnixSeconds,
 ) -> Result<VerifiedPartyAuthorization, PartyAuthError> {
     if submission.issued.role() != role {
@@ -219,8 +260,7 @@ fn handoff_digest(
     trade_commitment: TradeCommitment,
     receiver: &OrchardReceiverBytes,
     approved_at: UnixSeconds,
-    seller: &VerifiedPartyAuthorization,
-    buyer: &VerifiedPartyAuthorization,
+    parties: [(&AttestedPartyIdentity, &VerifiedPartyAuthorization); 2],
 ) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(APPROVED_SETTLEMENT_DOMAIN);
@@ -228,7 +268,14 @@ fn handoff_digest(
     h.update(trade_commitment.to_be_bytes());
     h.update(receiver.as_bytes());
     h.update(approved_at.get().to_be_bytes());
-    for evidence in [seller, buyer] {
+    for (identity, evidence) in parties {
+        let attestation = identity.attestation();
+        let attested = attestation.signing_bytes();
+        // Length prefix: attestation messages are variable length (<= 197 bytes).
+        h.update((attested.len() as u16).to_be_bytes());
+        h.update(attested);
+        h.update(attestation.signature());
+        h.update(identity.authority_key());
         h.update(evidence.request().signing_bytes());
         h.update(evidence.signer().to_bytes());
         h.update(evidence.signature());
@@ -238,10 +285,14 @@ fn handoff_digest(
 
 /// Immutable, M2-approved and party-authorized settlement: the only M3 output.
 ///
+/// It records which approved authority attested each party's key and the
+/// consent each party signed with that key. It is not spend authority: M4
+/// requires each party's wallet to authorize its own Zcash spend.
+///
 /// - Every field is private, and there is no setter or public constructor.
 ///   It is obtainable only from [`SettlementAuthorizer::approve`], which needs a
-///   `MatcherApproval` (mintable only by a fully passing M2 gate) plus verified
-///   seller and buyer authorizations.
+///   `MatcherApproval` (mintable only by a fully passing M2 gate) plus
+///   authority-attested seller and buyer keys and the consents signed by them.
 /// - It is not `Clone` and not serializable, so it cannot be duplicated or
 ///   rehydrated with edited values. [`verify_integrity`](Self::verify_integrity)
 ///   and [`handoff_digest`](Self::handoff_digest) let M4 detect any
@@ -256,6 +307,8 @@ pub struct ApprovedSettlement {
     trade_commitment: TradeCommitment,
     intent: TradeIntent,
     settlement_receiver: OrchardReceiverBytes,
+    seller_identity: AttestedPartyIdentity,
+    buyer_identity: AttestedPartyIdentity,
     seller_authorization: VerifiedPartyAuthorization,
     buyer_authorization: VerifiedPartyAuthorization,
     approved_at: UnixSeconds,
@@ -342,6 +395,18 @@ impl ApprovedSettlement {
         self.intent.expiry
     }
 
+    /// Authority-attested seller identity (whose key signed the consent).
+    #[must_use]
+    pub const fn seller_identity(&self) -> &AttestedPartyIdentity {
+        &self.seller_identity
+    }
+
+    /// Authority-attested buyer identity (whose key signed the consent).
+    #[must_use]
+    pub const fn buyer_identity(&self) -> &AttestedPartyIdentity {
+        &self.buyer_identity
+    }
+
     /// Verified seller authorization evidence.
     #[must_use]
     pub const fn seller_authorization(&self) -> &VerifiedPartyAuthorization {
@@ -360,15 +425,22 @@ impl ApprovedSettlement {
         self.approved_at
     }
 
-    /// SHA-256 over `"ZWA1APPROVEDSETTLEMENT" | version | commitment |
-    /// receiver | approved_at | (signing bytes | key | signature)` for the seller
-    /// then the buyer. It is a stable correlation and integrity reference for M4.
+    /// SHA-256 over `"ZWA1APPROVEDSETTLEMENT" | version (2) | commitment |
+    /// receiver | approved_at`, then for the seller and then the buyer:
+    /// `attestation_len u16 | attestation bytes | attestation signature |
+    /// authority key | consent signing bytes | party key | consent signature`.
+    /// It is a stable correlation and integrity reference for M4.
     #[must_use]
     pub const fn handoff_digest(&self) -> &[u8; 32] {
         &self.handoff_digest
     }
 
     /// Re-checks every invariant. M4 can call this at its boundary.
+    ///
+    /// It re-verifies both authority signatures with the recorded authority
+    /// keys; whether those authorities are still trusted is for the caller's
+    /// own trust root to decide (compare
+    /// [`AttestedPartyIdentity::authority_key`]).
     ///
     /// # Errors
     ///
@@ -378,10 +450,24 @@ impl ApprovedSettlement {
         if zwa_commitments::trade::trade_commitment_v1(&self.intent) != self.trade_commitment {
             return fail("intent does not recompute to the trade commitment");
         }
-        for (evidence, role) in [
-            (&self.seller_authorization, PartyRole::Seller),
-            (&self.buyer_authorization, PartyRole::Buyer),
+        for (identity, evidence, role) in [
+            (
+                &self.seller_identity,
+                &self.seller_authorization,
+                PartyRole::Seller,
+            ),
+            (
+                &self.buyer_identity,
+                &self.buyer_authorization,
+                PartyRole::Buyer,
+            ),
         ] {
+            if identity.role() != role || !identity.signature_is_valid() {
+                return fail("party-key attestation does not verify for its role");
+            }
+            if identity.party_key() != evidence.signer() {
+                return fail("authorization not signed by the attested party key");
+            }
             if evidence.role() != role || evidence.trade_commitment() != self.trade_commitment {
                 return fail("authorization evidence bound to another role or trade");
             }
@@ -392,12 +478,17 @@ impl ApprovedSettlement {
         if self.seller_authorization.signer() == self.buyer_authorization.signer() {
             return fail("seller and buyer keys are identical");
         }
+        if self.seller_identity.party() == self.buyer_identity.party() {
+            return fail("seller and buyer are the same party");
+        }
         let digest = handoff_digest(
             self.trade_commitment,
             &self.settlement_receiver,
             self.approved_at,
-            &self.seller_authorization,
-            &self.buyer_authorization,
+            [
+                (&self.seller_identity, &self.seller_authorization),
+                (&self.buyer_identity, &self.buyer_authorization),
+            ],
         );
         if digest != self.handoff_digest {
             return fail("handoff digest mismatch");
@@ -409,17 +500,18 @@ impl ApprovedSettlement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::party_auth::{
-        ExpectedParties, PartyAuthorizationRequest, RegisteredPartyKeys,
-        UnconfiguredPartyIdentitySource,
-    };
+    use crate::attestation::AttestationError;
+    use crate::party_auth::PartyAuthorizationRequest;
     use crate::test_support::{
-        approval_for, golden_intent, other_intent, party_key, registry_for, sign_locally,
-        signing_key, TermsEdit, BUYER_SEED, GOLDEN_TRADE_COMMITMENT, RECEIVER_A_HEX, SELLER_SEED,
-        T_ISSUED, T_NOW,
+        approval_for, buyer_attestation, golden_intent, other_intent, party_key,
+        seller_attestation, sign_locally, signing_key, trust_root, TermsEdit, BUYER_SEED,
+        GOLDEN_TRADE_COMMITMENT, RECEIVER_A_HEX, SELLER_SEED, T_ISSUED, T_NOW,
     };
 
+    #[derive(Clone)]
     struct Flow {
+        seller_att: PartyKeyAttestation,
+        buyer_att: PartyKeyAttestation,
         seller_req: PartyAuthorizationRequest,
         buyer_req: PartyAuthorizationRequest,
         seller_auth: PartyAuthorization,
@@ -440,6 +532,8 @@ mod tests {
         let seller_req = window(PartyRole::Seller, 1);
         let buyer_req = window(PartyRole::Buyer, 2);
         Flow {
+            seller_att: seller_attestation(),
+            buyer_att: buyer_attestation(),
             seller_auth: sign_locally(&seller_req, &signing_key(SELLER_SEED)),
             buyer_auth: sign_locally(&buyer_req, &signing_key(BUYER_SEED)),
             seller_req,
@@ -449,6 +543,7 @@ mod tests {
 
     fn seller(f: &Flow) -> Option<PartySubmission<'_>> {
         Some(PartySubmission {
+            attestation: &f.seller_att,
             issued: &f.seller_req,
             authorization: &f.seller_auth,
         })
@@ -456,6 +551,7 @@ mod tests {
 
     fn buyer(f: &Flow) -> Option<PartySubmission<'_>> {
         Some(PartySubmission {
+            attestation: &f.buyer_att,
             issued: &f.buyer_req,
             authorization: &f.buyer_auth,
         })
@@ -465,8 +561,8 @@ mod tests {
         UnixSeconds::new(T_NOW)
     }
 
-    fn authorizer() -> SettlementAuthorizer<RegisteredPartyKeys> {
-        SettlementAuthorizer::new(registry_for(&[golden_intent(), other_intent()]))
+    fn authorizer() -> SettlementAuthorizer {
+        SettlementAuthorizer::new(trust_root())
     }
 
     #[test]
@@ -501,6 +597,11 @@ mod tests {
         assert_eq!(s.seller_authorization().signer(), &party_key(SELLER_SEED));
         assert_eq!(s.buyer_authorization().role(), PartyRole::Buyer);
         assert_eq!(s.buyer_authorization().signer(), &party_key(BUYER_SEED));
+        assert_eq!(s.seller_identity().party_key(), &party_key(SELLER_SEED));
+        assert_eq!(s.seller_identity().party().as_bytes(), b"party:seller-0001");
+        assert_eq!(s.seller_identity().authority().as_bytes(), b"issuer-atlas");
+        assert_eq!(s.buyer_identity().party_key(), &party_key(BUYER_SEED));
+        assert_eq!(s.buyer_identity().authority().as_bytes(), b"cred-auth-1");
         assert_eq!(s.approved_at(), now());
         assert_eq!(s.verify_integrity(), Ok(()));
         // Deterministic digest over the same inputs.
@@ -529,10 +630,10 @@ mod tests {
     }
 
     #[test]
-    fn unconfigured_identity_source_fails_closed() {
+    fn empty_trust_root_fails_closed() {
         let intent = golden_intent();
         let f = flow(&intent);
-        let err = SettlementAuthorizer::new(UnconfiguredPartyIdentitySource)
+        let err = SettlementAuthorizer::new(PartyAttestationTrustRoot::new())
             .approve(
                 approval_for(&intent),
                 &RfqRequest::from_trade_intent(&intent),
@@ -543,7 +644,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            ApprovalError::Identity(PartyAuthError::IdentitySourceUnconfigured)
+            ApprovalError::SellerAttestation(AttestationError::UnknownAuthority)
         );
     }
 
@@ -553,11 +654,12 @@ mod tests {
         let terms = RfqRequest::from_trade_intent(&intent);
         let f = flow(&intent);
         // Matcher/coordinator generates both keys and signs both sides.
+        // Real attestations are reused, but the consents are signed by keys
+        // the matcher generated.
         let forged = Flow {
             seller_auth: sign_locally(&f.seller_req, &signing_key(0xB1)),
             buyer_auth: sign_locally(&f.buyer_req, &signing_key(0xB2)),
-            seller_req: f.seller_req.clone(),
-            buyer_req: f.buyer_req.clone(),
+            ..f.clone()
         };
         assert_eq!(
             authorizer()
@@ -583,31 +685,37 @@ mod tests {
                 .unwrap_err(),
             ApprovalError::Buyer(PartyAuthError::UnexpectedSigner)
         );
-        // Even if the attacker controls the registry entry of a *different*
-        // trade, this trade's expected keys are unaffected.
-        let mut registry = RegisteredPartyKeys::new();
-        registry
-            .register(
-                zwa_commitments::trade::trade_commitment_v1(&intent),
-                ExpectedParties::new(party_key(SELLER_SEED), party_key(BUYER_SEED)).unwrap(),
-            )
-            .unwrap();
-        registry
-            .register(
-                zwa_commitments::trade::trade_commitment_v1(&other_intent()),
-                ExpectedParties::new(party_key(0xB1), party_key(0xB2)).unwrap(),
-            )
-            .unwrap();
-        assert!(matches!(
-            SettlementAuthorizer::new(registry).approve(
-                approval_for(&intent),
-                &terms,
-                seller(&forged),
-                buyer(&forged),
-                now()
+        // A coordinator cannot register its own keys: there is no registry,
+        // and a self-signed attestation is from an unknown authority.
+        let self_attested = Flow {
+            seller_att: crate::test_support::attest(
+                0xC1,
+                b"matcher-authority",
+                PartyRole::Seller,
+                b"matcher-seller",
+                0xB1,
             ),
-            Err(ApprovalError::Seller(PartyAuthError::UnexpectedSigner))
-        ));
+            buyer_att: crate::test_support::attest(
+                0xC1,
+                b"matcher-authority",
+                PartyRole::Buyer,
+                b"matcher-buyer",
+                0xB2,
+            ),
+            ..forged.clone()
+        };
+        assert_eq!(
+            authorizer()
+                .approve(
+                    approval_for(&intent),
+                    &terms,
+                    seller(&self_attested),
+                    buyer(&self_attested),
+                    now()
+                )
+                .unwrap_err(),
+            ApprovalError::SellerAttestation(AttestationError::UnknownAuthority)
+        );
     }
 
     #[test]
@@ -620,7 +728,7 @@ mod tests {
             authorizer()
                 .approve(approval_for(&intent), &terms, buyer(&f), seller(&f), now())
                 .unwrap_err(),
-            ApprovalError::Seller(PartyAuthError::WrongRole {
+            ApprovalError::SellerAttestation(AttestationError::WrongRole {
                 expected: PartyRole::Seller,
                 got: PartyRole::Buyer
             })
@@ -629,8 +737,7 @@ mod tests {
         let swapped = Flow {
             seller_auth: sign_locally(&f.seller_req, &signing_key(BUYER_SEED)),
             buyer_auth: sign_locally(&f.buyer_req, &signing_key(SELLER_SEED)),
-            seller_req: f.seller_req.clone(),
-            buyer_req: f.buyer_req.clone(),
+            ..f.clone()
         };
         assert_eq!(
             authorizer()
@@ -801,6 +908,7 @@ mod tests {
                 approval_for(&intent),
                 &terms,
                 Some(PartySubmission {
+                    attestation: &f.seller_att,
                     issued: &short,
                     authorization: &short_auth
                 }),
@@ -826,6 +934,7 @@ mod tests {
                     &RfqRequest::from_trade_intent(&intent),
                     seller(&f),
                     Some(PartySubmission {
+                        attestation: &f.buyer_att,
                         issued: &f.buyer_req,
                         authorization: &bad
                     }),

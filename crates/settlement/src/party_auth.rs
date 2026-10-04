@@ -1,20 +1,19 @@
 //! Independent party authorization (M3 remediation F-03, F-04, §5).
 //!
-//! # Trust anchor (F-03)
+//! # Trust anchor (F-03, owner decision B + C)
 //!
 //! The key that must have signed for each role is **never** taken from the
-//! authorization object. It comes from a [`PartyIdentitySource`], which the
-//! integrator must back with an independently authenticated source (for
-//! example an authenticated client session, a wallet identity established
-//! during the RFQ, or an externally registered authorization key). The
-//! product architecture does not yet define that source, so M3 defines the
-//! interface and ships:
+//! authorization object, and never from a registry the coordinator fills on
+//! its own. It comes only from an [`crate::attestation::AttestedPartyIdentity`]:
+//! a party-key attestation signed by a configured credential authority or
+//! issuer and verified by a
+//! [`crate::attestation::PartyAttestationTrustRoot`]. [`ExpectedParties`] is
+//! built from the two attested keys inside
+//! [`crate::approved::SettlementAuthorizer::approve`].
 //!
-//! - [`UnconfiguredPartyIdentitySource`]: the fail-closed default; every
-//!   lookup fails.
-//! - [`RegisteredPartyKeys`]: an explicit registry of expected keys per trade.
-//!   It must only be populated from an authenticated channel; it does not
-//!   decide by itself who the parties are.
+//! M3 verifies credential-authority-attested party consent for the exact
+//! M2-approved trade. M3 does not hold spending authority. M4 requires each
+//! party's wallet to authorize its own Zcash spend.
 //!
 //! # No private keys on the server (F-04)
 //!
@@ -50,8 +49,6 @@
 //! - Expiry: `now > expires_at` fails and `now == expires_at` is valid, the
 //!   same predicate as the frozen trade expiry. A request may not outlive its
 //!   trade.
-
-use std::collections::BTreeMap;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use zwa_protocol::numbers::UnixSeconds;
@@ -90,15 +87,6 @@ impl PartyRole {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PartyAuthError {
-    /// No identity source configured.
-    #[error("party identity source is not configured (fail closed)")]
-    IdentitySourceUnconfigured,
-    /// The identity source knows no parties for this trade.
-    #[error("no expected party keys are registered for this trade")]
-    UnknownTrade,
-    /// A different key pair is already registered for this trade.
-    #[error("different party keys are already registered for this trade")]
-    ConflictingRegistration,
     /// Seller and buyer keys are identical.
     #[error("seller and buyer must have distinct authorization keys")]
     SameKeyForBothRoles,
@@ -242,83 +230,6 @@ impl ExpectedParties {
     #[must_use]
     pub const fn buyer(&self) -> &PartyVerificationKey {
         &self.buyer
-    }
-}
-
-/// Independently authenticated source of the expected party keys (F-03).
-///
-/// Implementations must derive the answer from their own authenticated
-/// records, never from anything inside a `PartyAuthorization`.
-pub trait PartyIdentitySource: Send + Sync {
-    /// Expected seller and buyer keys for `trade_commitment`.
-    ///
-    /// # Errors
-    ///
-    /// Any error; callers fail closed.
-    fn expected_parties(
-        &self,
-        trade_commitment: TradeCommitment,
-    ) -> Result<ExpectedParties, PartyAuthError>;
-}
-
-/// Default identity source: always fails closed until a real one is supplied.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnconfiguredPartyIdentitySource;
-
-impl PartyIdentitySource for UnconfiguredPartyIdentitySource {
-    fn expected_parties(&self, _: TradeCommitment) -> Result<ExpectedParties, PartyAuthError> {
-        Err(PartyAuthError::IdentitySourceUnconfigured)
-    }
-}
-
-/// Explicit registry of externally registered authorization keys per trade.
-///
-/// Populate it only from an authenticated channel (for example the
-/// authenticated RFQ sessions of both counterparties). A registration cannot
-/// be silently replaced by a different key pair.
-#[derive(Debug, Clone, Default)]
-pub struct RegisteredPartyKeys {
-    entries: BTreeMap<TradeCommitment, ExpectedParties>,
-}
-
-impl RegisteredPartyKeys {
-    /// Empty registry (every lookup fails with `UnknownTrade`).
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Registers the expected parties of a trade. Re-registering the same pair
-    /// is a no-op.
-    ///
-    /// # Errors
-    ///
-    /// [`PartyAuthError::ConflictingRegistration`] if a different pair is registered.
-    pub fn register(
-        &mut self,
-        trade_commitment: TradeCommitment,
-        parties: ExpectedParties,
-    ) -> Result<(), PartyAuthError> {
-        match self.entries.get(&trade_commitment) {
-            Some(existing) if *existing != parties => Err(PartyAuthError::ConflictingRegistration),
-            Some(_) => Ok(()),
-            None => {
-                self.entries.insert(trade_commitment, parties);
-                Ok(())
-            }
-        }
-    }
-}
-
-impl PartyIdentitySource for RegisteredPartyKeys {
-    fn expected_parties(
-        &self,
-        trade_commitment: TradeCommitment,
-    ) -> Result<ExpectedParties, PartyAuthError> {
-        self.entries
-            .get(&trade_commitment)
-            .copied()
-            .ok_or(PartyAuthError::UnknownTrade)
     }
 }
 
@@ -898,29 +809,13 @@ mod tests {
     }
 
     #[test]
-    fn identity_sources_fail_closed_and_registrations_are_not_replaceable() {
-        let c = zwa_commitments::trade::trade_commitment_v1(&golden_intent());
-        assert_eq!(
-            UnconfiguredPartyIdentitySource.expected_parties(c),
-            Err(PartyAuthError::IdentitySourceUnconfigured)
-        );
-        let mut registry = RegisteredPartyKeys::new();
-        assert_eq!(
-            registry.expected_parties(c),
-            Err(PartyAuthError::UnknownTrade)
-        );
-        let parties = ExpectedParties::new(party_key(SELLER_SEED), party_key(BUYER_SEED)).unwrap();
-        registry.register(c, parties).unwrap();
-        registry.register(c, parties).unwrap();
-        let attacker = ExpectedParties::new(party_key(0xA7), party_key(BUYER_SEED)).unwrap();
-        assert_eq!(
-            registry.register(c, attacker),
-            Err(PartyAuthError::ConflictingRegistration)
-        );
-        assert_eq!(registry.expected_parties(c), Ok(parties));
+    fn expected_parties_require_distinct_keys() {
         assert_eq!(
             ExpectedParties::new(party_key(SELLER_SEED), party_key(SELLER_SEED)),
             Err(PartyAuthError::SameKeyForBothRoles)
         );
+        let parties = ExpectedParties::new(party_key(SELLER_SEED), party_key(BUYER_SEED)).unwrap();
+        assert_eq!(parties.key_for(PartyRole::Seller), &party_key(SELLER_SEED));
+        assert_eq!(parties.key_for(PartyRole::Buyer), &party_key(BUYER_SEED));
     }
 }

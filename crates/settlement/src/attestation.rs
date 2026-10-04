@@ -482,6 +482,17 @@ impl AttestedPartyIdentity {
         &self.attestation
     }
 
+    /// Re-verifies the stored authority signature and key binding.
+    pub(crate) fn signature_is_valid(&self) -> bool {
+        self.attestation.party_key == self.party_key.to_bytes()
+            && self
+                .authority_key
+                .verify_strict(
+                    &self.attestation.signing_bytes(),
+                    &Signature::from_bytes(&self.attestation.signature),
+                )
+                .is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -555,6 +566,7 @@ mod tests {
         assert_eq!(seller.party().as_bytes(), SELLER_PARTY_ID);
         assert_eq!(seller.authority().as_bytes(), SELLER_ATTESTOR_ID);
         assert_eq!(seller.party_key(), &party_key(SELLER_SEED));
+        assert!(seller.signature_is_valid());
         assert_eq!(
             seller.authority_key(),
             attestor_key(SELLER_ATTESTOR_SEED).to_bytes()
@@ -563,6 +575,7 @@ mod tests {
             .verify(&buyer_attestation(), PartyRole::Buyer, now())
             .unwrap();
         assert_eq!(buyer.party_key(), &party_key(BUYER_SEED));
+        assert!(buyer.signature_is_valid());
     }
 
     #[test]

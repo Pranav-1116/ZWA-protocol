@@ -6,11 +6,20 @@
 //!                                     │
 //!                         M2 MatcherGate::evaluate ──▶ MatcherApproval
 //!                                     │
-//!     seller + buyer PartyAuthorization (signed locally by each party,
-//!     keys expected via an independent PartyIdentitySource)
+//!     seller + buyer PartyKeyAttestation (signed by a configured
+//!     credential authority / issuer; verified by PartyAttestationTrustRoot)
+//!                                     │
+//!     seller + buyer PartyAuthorization (signed locally by each party with
+//!     the attested key)
 //!                                     │
 //!                  SettlementAuthorizer::approve ──▶ ApprovedSettlement ──▶ M4
 //! ```
+//!
+//! # Claim
+//!
+//! M3 verifies credential-authority-attested party consent for the exact
+//! M2-approved trade. M3 does not hold spending authority. M4 requires each
+//! party's wallet to authorize its own Zcash spend.
 //!
 //! # Scope boundary
 //!
@@ -48,8 +57,7 @@ pub use attestation::{
 };
 pub use party_auth::{
     verify_party_authorization, ExpectedParties, PartyAuthError, PartyAuthorization,
-    PartyAuthorizationRequest, PartyIdentitySource, PartyRole, PartyVerificationKey,
-    RegisteredPartyKeys, UnconfiguredPartyIdentitySource, VerifiedPartyAuthorization,
+    PartyAuthorizationRequest, PartyRole, PartyVerificationKey, VerifiedPartyAuthorization,
     PARTY_AUTH_DOMAIN, PARTY_AUTH_MESSAGE_LEN, PARTY_AUTH_NONCE_LEN, PARTY_AUTH_VERSION,
 };
 pub use rfq::{RfqRequest, TermsMismatch};
