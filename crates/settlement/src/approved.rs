@@ -974,4 +974,349 @@ mod tests {
             .unwrap();
         assert!(!derive.contains("Clone") && !derive.contains("Serialize"));
     }
+
+    // -----------------------------------------------------------------------
+    // Adversarial party-key attestation and consent coverage (DR-M3-01).
+    // -----------------------------------------------------------------------
+
+    use crate::test_support::{
+        attest, attest_window, BUYER_ATTESTOR_ID, BUYER_ATTESTOR_SEED, BUYER_PARTY_ID,
+        SELLER_ATTESTOR_ID, SELLER_ATTESTOR_SEED, SELLER_PARTY_ID,
+    };
+
+    fn approve_golden(f: &Flow) -> Result<ApprovedSettlement, ApprovalError> {
+        let intent = golden_intent();
+        authorizer().approve(
+            approval_for(&intent),
+            &RfqRequest::from_trade_intent(&intent),
+            seller(f),
+            buyer(f),
+            now(),
+        )
+    }
+
+    fn buyer_attested(party_id: &[u8], party_seed: u8) -> PartyKeyAttestation {
+        attest(
+            BUYER_ATTESTOR_SEED,
+            BUYER_ATTESTOR_ID,
+            PartyRole::Buyer,
+            party_id,
+            party_seed,
+        )
+    }
+
+    #[test]
+    fn forged_authority_signature_rejects() {
+        let f = flow(&golden_intent());
+        let a = &f.seller_att;
+        let mut sig = *a.signature();
+        sig[0] ^= 0x01;
+        let tampered = PartyKeyAttestation::new(
+            a.authority().clone(),
+            a.role(),
+            a.party().clone(),
+            *a.party_key(),
+            a.valid_from(),
+            a.expires_at(),
+            sig,
+        )
+        .unwrap();
+        let forged = Flow {
+            seller_att: tampered,
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&forged).unwrap_err(),
+            ApprovalError::SellerAttestation(AttestationError::BadSignature)
+        );
+        // The real authority id, signed with a key the attacker controls.
+        let impostor = Flow {
+            buyer_att: attest(
+                0xC2,
+                BUYER_ATTESTOR_ID,
+                PartyRole::Buyer,
+                BUYER_PARTY_ID,
+                BUYER_SEED,
+            ),
+            ..f
+        };
+        assert_eq!(
+            approve_golden(&impostor).unwrap_err(),
+            ApprovalError::BuyerAttestation(AttestationError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn wrong_credential_authority_rejects() {
+        let f = flow(&golden_intent());
+        // An authority that is not in the trust root.
+        let unknown = Flow {
+            buyer_att: attest(
+                BUYER_ATTESTOR_SEED,
+                b"cred-auth-2",
+                PartyRole::Buyer,
+                BUYER_PARTY_ID,
+                BUYER_SEED,
+            ),
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&unknown).unwrap_err(),
+            ApprovalError::BuyerAttestation(AttestationError::UnknownAuthority)
+        );
+        // The issuer (seller-only) attesting the buyer.
+        let issuer_for_buyer = Flow {
+            buyer_att: attest(
+                SELLER_ATTESTOR_SEED,
+                SELLER_ATTESTOR_ID,
+                PartyRole::Buyer,
+                BUYER_PARTY_ID,
+                BUYER_SEED,
+            ),
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&issuer_for_buyer).unwrap_err(),
+            ApprovalError::BuyerAttestation(AttestationError::RoleNotAllowed {
+                role: PartyRole::Buyer
+            })
+        );
+        // The credential authority (buyer-only) attesting the seller.
+        let authority_for_seller = Flow {
+            seller_att: attest(
+                BUYER_ATTESTOR_SEED,
+                BUYER_ATTESTOR_ID,
+                PartyRole::Seller,
+                SELLER_PARTY_ID,
+                SELLER_SEED,
+            ),
+            ..f
+        };
+        assert_eq!(
+            approve_golden(&authority_for_seller).unwrap_err(),
+            ApprovalError::SellerAttestation(AttestationError::RoleNotAllowed {
+                role: PartyRole::Seller
+            })
+        );
+    }
+
+    #[test]
+    fn seller_credential_as_buyer_and_buyer_credential_as_seller_reject() {
+        let f = flow(&golden_intent());
+        let seller_as_buyer = Flow {
+            buyer_att: f.seller_att.clone(),
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&seller_as_buyer).unwrap_err(),
+            ApprovalError::BuyerAttestation(AttestationError::WrongRole {
+                expected: PartyRole::Buyer,
+                got: PartyRole::Seller
+            })
+        );
+        let buyer_as_seller = Flow {
+            seller_att: f.buyer_att.clone(),
+            ..f
+        };
+        assert_eq!(
+            approve_golden(&buyer_as_seller).unwrap_err(),
+            ApprovalError::SellerAttestation(AttestationError::WrongRole {
+                expected: PartyRole::Seller,
+                got: PartyRole::Buyer
+            })
+        );
+    }
+
+    #[test]
+    fn expired_or_not_yet_valid_attestation_rejects() {
+        let f = flow(&golden_intent());
+        let expired = Flow {
+            seller_att: attest_window(
+                SELLER_ATTESTOR_SEED,
+                SELLER_ATTESTOR_ID,
+                PartyRole::Seller,
+                SELLER_PARTY_ID,
+                SELLER_SEED,
+                T_ISSUED,
+                T_NOW - 1,
+            ),
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&expired).unwrap_err(),
+            ApprovalError::SellerAttestation(AttestationError::Expired {
+                now: T_NOW,
+                expires_at: T_NOW - 1
+            })
+        );
+        let early = Flow {
+            buyer_att: attest_window(
+                BUYER_ATTESTOR_SEED,
+                BUYER_ATTESTOR_ID,
+                PartyRole::Buyer,
+                BUYER_PARTY_ID,
+                BUYER_SEED,
+                T_NOW + 1,
+                T_NOW + 1_000,
+            ),
+            ..f
+        };
+        assert_eq!(
+            approve_golden(&early).unwrap_err(),
+            ApprovalError::BuyerAttestation(AttestationError::NotYetValid {
+                now: T_NOW,
+                valid_from: T_NOW + 1
+            })
+        );
+    }
+
+    #[test]
+    fn same_party_or_same_key_in_both_roles_rejects() {
+        let f = flow(&golden_intent());
+        // The buyer slot claims the seller's party id.
+        let same_party = Flow {
+            buyer_att: buyer_attested(SELLER_PARTY_ID, BUYER_SEED),
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&same_party).unwrap_err(),
+            ApprovalError::SamePartyForBothRoles
+        );
+        // Two party ids, one key: one signer would consent for both sides.
+        let same_key = Flow {
+            buyer_att: buyer_attested(b"party:buyer-0002", SELLER_SEED),
+            buyer_auth: sign_locally(&f.buyer_req, &signing_key(SELLER_SEED)),
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&same_key).unwrap_err(),
+            ApprovalError::Identity(PartyAuthError::SameKeyForBothRoles)
+        );
+    }
+
+    #[test]
+    fn consent_must_come_from_the_attested_key() {
+        let f = flow(&golden_intent());
+        // Valid buyer attestation, consent signed by a matcher key.
+        let wrong_signer = Flow {
+            buyer_auth: sign_locally(&f.buyer_req, &signing_key(0xB2)),
+            ..f.clone()
+        };
+        assert_eq!(
+            approve_golden(&wrong_signer).unwrap_err(),
+            ApprovalError::Buyer(PartyAuthError::UnexpectedSigner)
+        );
+        // A valid attestation of a different buyer moved next to the real
+        // buyer's consent.
+        let moved = Flow {
+            buyer_att: buyer_attested(b"party:buyer-0002", 0xB3),
+            ..f
+        };
+        assert_eq!(
+            approve_golden(&moved).unwrap_err(),
+            ApprovalError::Buyer(PartyAuthError::UnexpectedSigner)
+        );
+    }
+
+    #[test]
+    fn altered_consent_nonce_or_expiry_rejects() {
+        let intent = golden_intent();
+        let f = flow(&intent);
+        let echo = |nonce: u8, expires_at: u64| {
+            let altered = PartyAuthorizationRequest::new(
+                PartyRole::Seller,
+                &intent,
+                [nonce; 32],
+                UnixSeconds::new(T_ISSUED),
+                UnixSeconds::new(expires_at),
+            )
+            .unwrap();
+            sign_locally(&altered, &signing_key(SELLER_SEED))
+        };
+        let expiry = intent.expiry.get();
+        for (auth, field) in [
+            (echo(9, expiry), "nonce"),
+            (echo(1, T_NOW + 50), "expires_at"),
+        ] {
+            let altered = Flow {
+                seller_auth: auth,
+                ..f.clone()
+            };
+            assert_eq!(
+                approve_golden(&altered).unwrap_err(),
+                ApprovalError::Seller(PartyAuthError::RequestMismatch { field }),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn altered_trade_nonce_rejects() {
+        let intent = golden_intent();
+        let f = flow(&intent);
+        let mut terms = RfqRequest::from_trade_intent(&intent);
+        terms.nonce = TradeNonce::new(intent.nonce.get() + 1);
+        assert_eq!(
+            authorizer()
+                .approve(approval_for(&intent), &terms, seller(&f), buyer(&f), now())
+                .unwrap_err(),
+            ApprovalError::TermsMismatch { field: "nonce" }
+        );
+    }
+
+    #[test]
+    fn attested_identities_are_bound_into_the_handoff() {
+        assert_eq!(APPROVED_SETTLEMENT_VERSION, 2);
+        let f = flow(&golden_intent());
+        let a = approve_golden(&f).unwrap();
+        // Same consents, buyer key attested under another party id.
+        let other_party = Flow {
+            buyer_att: buyer_attested(b"party:buyer-0002", BUYER_SEED),
+            ..f
+        };
+        let b = approve_golden(&other_party).unwrap();
+        assert_eq!(b.verify_integrity(), Ok(()));
+        assert_ne!(a.handoff_digest(), b.handoff_digest());
+    }
+
+    #[test]
+    fn verify_integrity_detects_identity_tampering() {
+        let f = flow(&golden_intent());
+        let identity =
+            |att: &PartyKeyAttestation, role| trust_root().verify(att, role, now()).unwrap();
+        let violation = |reason: &'static str| -> Result<(), ApprovalError> {
+            Err(ApprovalError::IntegrityViolation { reason })
+        };
+
+        let mut s = approve_golden(&f).unwrap();
+        s.seller_identity = identity(&f.buyer_att, PartyRole::Buyer);
+        assert_eq!(
+            s.verify_integrity(),
+            violation("party-key attestation does not verify for its role")
+        );
+
+        let mut s = approve_golden(&f).unwrap();
+        s.buyer_identity = identity(&buyer_attested(b"party:buyer-0002", 0xB3), PartyRole::Buyer);
+        assert_eq!(
+            s.verify_integrity(),
+            violation("authorization not signed by the attested party key")
+        );
+
+        let mut s = approve_golden(&f).unwrap();
+        s.buyer_identity = identity(
+            &buyer_attested(SELLER_PARTY_ID, BUYER_SEED),
+            PartyRole::Buyer,
+        );
+        assert_eq!(
+            s.verify_integrity(),
+            violation("seller and buyer are the same party")
+        );
+
+        let mut s = approve_golden(&f).unwrap();
+        s.buyer_identity = identity(
+            &buyer_attested(b"party:buyer-0002", BUYER_SEED),
+            PartyRole::Buyer,
+        );
+        assert_eq!(s.verify_integrity(), violation("handoff digest mismatch"));
+    }
 }
