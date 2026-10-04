@@ -33,12 +33,18 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod approved;
+pub mod attestation;
 pub mod party_auth;
 pub mod rfq;
 
 pub use approved::{
     ApprovalError, ApprovedSettlement, PartySubmission, SettlementAuthorizer,
     APPROVED_SETTLEMENT_DOMAIN, APPROVED_SETTLEMENT_VERSION,
+};
+pub use attestation::{
+    attestation_message, AttestationError, AttestedPartyIdentity, AuthorityId,
+    PartyAttestationTrustRoot, PartyId, PartyKeyAttestation, MAX_ATTESTATION_ID_LEN,
+    PARTY_ATTESTATION_DOMAIN, PARTY_ATTESTATION_VERSION,
 };
 pub use party_auth::{
     verify_party_authorization, ExpectedParties, PartyAuthError, PartyAuthorization,
@@ -56,11 +62,12 @@ mod boundary_tests {
     //! Static boundary checks over the production sources (§8, §13, F-04,
     //! F-09, F-11, F-12). Line based, comments skipped, CRLF safe.
 
-    const PRODUCTION_SOURCES: [(&str, &str); 4] = [
+    const PRODUCTION_SOURCES: [(&str, &str); 5] = [
         ("lib.rs", include_str!("lib.rs")),
         ("rfq.rs", include_str!("rfq.rs")),
         ("party_auth.rs", include_str!("party_auth.rs")),
         ("approved.rs", include_str!("approved.rs")),
+        ("attestation.rs", include_str!("attestation.rs")),
     ];
 
     /// Non-comment lines before the first test module, lowercased.

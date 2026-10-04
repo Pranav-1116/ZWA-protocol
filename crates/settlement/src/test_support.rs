@@ -91,9 +91,12 @@ use zwa_protocol::{
     MatcherFee, OpaqueSignature, PolicyRoot, RecipientCommitment, TradeIntent, ZatoshiAmount,
 };
 
+use crate::attestation::{
+    attestation_message, AuthorityId, PartyAttestationTrustRoot, PartyId, PartyKeyAttestation,
+};
 use crate::party_auth::{
-    ExpectedParties, PartyAuthorization, PartyAuthorizationRequest, PartyVerificationKey,
-    RegisteredPartyKeys,
+    ExpectedParties, PartyAuthorization, PartyAuthorizationRequest, PartyRole,
+    PartyVerificationKey, RegisteredPartyKeys,
 };
 use crate::rfq::RfqRequest;
 
@@ -117,6 +120,20 @@ pub(crate) const BUYER_SEED: u8 = 11;
 pub(crate) const T_ISSUED: u64 = 1_900_000_000;
 pub(crate) const T_NOW: u64 = 1_900_000_100;
 
+/// Party-key authorities (DR-M3-01, B + C): the issuer attests sellers, the
+/// credential authority attests buyers. Their keys are distinct from the M2
+/// root-signing fixture keys (seeds 1 and 2).
+pub(crate) const SELLER_ATTESTOR_SEED: u8 = 20;
+pub(crate) const BUYER_ATTESTOR_SEED: u8 = 21;
+pub(crate) const SELLER_ATTESTOR_ID: &[u8] = b"issuer-atlas";
+pub(crate) const BUYER_ATTESTOR_ID: &[u8] = b"cred-auth-1";
+/// Authority-assigned party ids.
+pub(crate) const SELLER_PARTY_ID: &[u8] = b"party:seller-0001";
+pub(crate) const BUYER_PARTY_ID: &[u8] = b"party:buyer-0001";
+/// Attestation validity window (contains `T_ISSUED`, `T_NOW` and the trade expiry).
+pub(crate) const T_ATTEST_FROM: u64 = 1_800_000_000;
+pub(crate) const T_ATTEST_UNTIL: u64 = 2_100_000_000;
+
 pub(crate) fn signing_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
 }
@@ -124,6 +141,92 @@ pub(crate) fn signing_key(seed: u8) -> SigningKey {
 pub(crate) fn party_key(seed: u8) -> PartyVerificationKey {
     PartyVerificationKey::from_bytes(&signing_key(seed).verifying_key().to_bytes())
         .expect("valid ed25519 key")
+}
+
+/// Public key of a party-key authority.
+pub(crate) fn attestor_key(seed: u8) -> ed25519_dalek::VerifyingKey {
+    signing_key(seed).verifying_key()
+}
+
+/// Trust root as an operator would configure it: issuer → seller only,
+/// credential authority → buyer only.
+pub(crate) fn trust_root() -> PartyAttestationTrustRoot {
+    let mut root = PartyAttestationTrustRoot::new();
+    root.add_authority(
+        AuthorityId::new(SELLER_ATTESTOR_ID).expect("id"),
+        &attestor_key(SELLER_ATTESTOR_SEED).to_bytes(),
+        &[PartyRole::Seller],
+    )
+    .expect("issuer authority");
+    root.add_authority(
+        AuthorityId::new(BUYER_ATTESTOR_ID).expect("id"),
+        &attestor_key(BUYER_ATTESTOR_SEED).to_bytes(),
+        &[PartyRole::Buyer],
+    )
+    .expect("credential authority");
+    root
+}
+
+/// What an authority does off-path: sign a party-key attestation with an
+/// explicit window. Test-only; production M3 never holds authority keys.
+pub(crate) fn attest_window(
+    attestor_seed: u8,
+    attestor_id: &[u8],
+    role: PartyRole,
+    party_id: &[u8],
+    party_seed: u8,
+    valid_from: u64,
+    expires_at: u64,
+) -> PartyKeyAttestation {
+    let authority = AuthorityId::new(attestor_id).expect("authority id");
+    let party = PartyId::new(party_id).expect("party id");
+    let key = party_key(party_seed).to_bytes();
+    let (from, until) = (UnixSeconds::new(valid_from), UnixSeconds::new(expires_at));
+    let message = attestation_message(&authority, role, &party, &key, from, until);
+    let signature = signing_key(attestor_seed).sign(&message).to_bytes();
+    PartyKeyAttestation::new(authority, role, party, key, from, until, signature)
+        .expect("attestation")
+}
+
+/// [`attest_window`] with the default window.
+pub(crate) fn attest(
+    attestor_seed: u8,
+    attestor_id: &[u8],
+    role: PartyRole,
+    party_id: &[u8],
+    party_seed: u8,
+) -> PartyKeyAttestation {
+    attest_window(
+        attestor_seed,
+        attestor_id,
+        role,
+        party_id,
+        party_seed,
+        T_ATTEST_FROM,
+        T_ATTEST_UNTIL,
+    )
+}
+
+/// The issuer's attestation of the seller key.
+pub(crate) fn seller_attestation() -> PartyKeyAttestation {
+    attest(
+        SELLER_ATTESTOR_SEED,
+        SELLER_ATTESTOR_ID,
+        PartyRole::Seller,
+        SELLER_PARTY_ID,
+        SELLER_SEED,
+    )
+}
+
+/// The credential authority's attestation of the buyer key.
+pub(crate) fn buyer_attestation() -> PartyKeyAttestation {
+    attest(
+        BUYER_ATTESTOR_SEED,
+        BUYER_ATTESTOR_ID,
+        PartyRole::Buyer,
+        BUYER_PARTY_ID,
+        BUYER_SEED,
+    )
 }
 
 /// What a party's own wallet/client does: sign the issued request locally and
