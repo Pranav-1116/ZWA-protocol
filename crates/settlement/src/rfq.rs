@@ -112,7 +112,10 @@ impl RfqRequest {
             ("offered_asset", self.offered_asset == offered_asset),
             ("offered_amount", self.offered_amount == offered_amount),
             ("requested_asset", self.requested_asset == requested_asset),
-            ("requested_amount", self.requested_amount == requested_amount),
+            (
+                "requested_amount",
+                self.requested_amount == requested_amount,
+            ),
             (
                 "recipient_commitment",
                 self.recipient_commitment == recipient_commitment,
@@ -190,7 +193,10 @@ mod tests {
                 "matcher_fee.recipient_commitment",
                 Box::new(move |r: &mut RfqRequest| r.matcher_fee.recipient_commitment = other_rc),
             ),
-            ("nonce", Box::new(|r: &mut RfqRequest| r.nonce = TradeNonce::new(7002))),
+            (
+                "nonce",
+                Box::new(|r: &mut RfqRequest| r.nonce = TradeNonce::new(7002)),
+            ),
             (
                 "expiry",
                 Box::new(|r: &mut RfqRequest| r.expiry = TradeExpiry::new(2_000_000_001)),

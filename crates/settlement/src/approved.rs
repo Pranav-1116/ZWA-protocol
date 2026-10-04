@@ -517,11 +517,13 @@ mod tests {
         let terms = RfqRequest::from_trade_intent(&intent);
         let a = authorizer();
         assert_eq!(
-            a.approve(approval_for(&intent), &terms, None, buyer(&f), now()).unwrap_err(),
+            a.approve(approval_for(&intent), &terms, None, buyer(&f), now())
+                .unwrap_err(),
             ApprovalError::MissingSellerAuthorization
         );
         assert_eq!(
-            a.approve(approval_for(&intent), &terms, seller(&f), None, now()).unwrap_err(),
+            a.approve(approval_for(&intent), &terms, seller(&f), None, now())
+                .unwrap_err(),
             ApprovalError::MissingBuyerAuthorization
         );
     }
@@ -559,13 +561,25 @@ mod tests {
         };
         assert_eq!(
             authorizer()
-                .approve(approval_for(&intent), &terms, seller(&forged), buyer(&f), now())
+                .approve(
+                    approval_for(&intent),
+                    &terms,
+                    seller(&forged),
+                    buyer(&f),
+                    now()
+                )
                 .unwrap_err(),
             ApprovalError::Seller(PartyAuthError::UnexpectedSigner)
         );
         assert_eq!(
             authorizer()
-                .approve(approval_for(&intent), &terms, seller(&f), buyer(&forged), now())
+                .approve(
+                    approval_for(&intent),
+                    &terms,
+                    seller(&f),
+                    buyer(&forged),
+                    now()
+                )
                 .unwrap_err(),
             ApprovalError::Buyer(PartyAuthError::UnexpectedSigner)
         );
@@ -620,7 +634,13 @@ mod tests {
         };
         assert_eq!(
             authorizer()
-                .approve(approval_for(&intent), &terms, seller(&swapped), buyer(&swapped), now())
+                .approve(
+                    approval_for(&intent),
+                    &terms,
+                    seller(&swapped),
+                    buyer(&swapped),
+                    now()
+                )
                 .unwrap_err(),
             ApprovalError::Seller(PartyAuthError::UnexpectedSigner)
         );
@@ -634,13 +654,25 @@ mod tests {
         let terms = RfqRequest::from_trade_intent(&a);
         assert_eq!(
             authorizer()
-                .approve(approval_for(&a), &terms, seller(&b_flow), buyer(&a_flow), now())
+                .approve(
+                    approval_for(&a),
+                    &terms,
+                    seller(&b_flow),
+                    buyer(&a_flow),
+                    now()
+                )
                 .unwrap_err(),
             ApprovalError::Seller(PartyAuthError::WrongTrade)
         );
         assert_eq!(
             authorizer()
-                .approve(approval_for(&a), &terms, seller(&a_flow), buyer(&b_flow), now())
+                .approve(
+                    approval_for(&a),
+                    &terms,
+                    seller(&a_flow),
+                    buyer(&b_flow),
+                    now()
+                )
                 .unwrap_err(),
             ApprovalError::Buyer(PartyAuthError::WrongTrade)
         );
@@ -721,7 +753,13 @@ mod tests {
             let ok = flow(&approved);
             assert_eq!(
                 authorizer()
-                    .approve(approval_for(&approved), &terms, seller(&m), buyer(&ok), now())
+                    .approve(
+                        approval_for(&approved),
+                        &terms,
+                        seller(&m),
+                        buyer(&ok),
+                        now()
+                    )
                     .unwrap_err(),
                 ApprovalError::Seller(PartyAuthError::WrongTrade)
             );
@@ -813,7 +851,10 @@ mod tests {
             .split('}')
             .next()
             .unwrap();
-        assert!(!body.contains("pub "), "ApprovedSettlement fields must be private");
+        assert!(
+            !body.contains("pub "),
+            "ApprovedSettlement fields must be private"
+        );
         assert!(!prod.contains("&mut self"), "no mutators");
         let derive = prod
             .split("pub struct ApprovedSettlement {")

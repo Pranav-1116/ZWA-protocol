@@ -647,7 +647,10 @@ mod tests {
     #[test]
     fn correct_seller_and_buyer_keys_pass() {
         let intent = golden_intent();
-        for (role, seed) in [(PartyRole::Seller, SELLER_SEED), (PartyRole::Buyer, BUYER_SEED)] {
+        for (role, seed) in [
+            (PartyRole::Seller, SELLER_SEED),
+            (PartyRole::Buyer, BUYER_SEED),
+        ] {
             let issued = request(role, &intent, 1);
             let auth = sign_locally(&issued, &signing_key(seed));
             let verified =
@@ -661,14 +664,20 @@ mod tests {
     #[test]
     fn attacker_self_generated_key_inserted_into_authorization_is_rejected() {
         let intent = golden_intent();
-        let slots = [(PartyRole::Seller, SELLER_SEED), (PartyRole::Buyer, BUYER_SEED)];
+        let slots = [
+            (PartyRole::Seller, SELLER_SEED),
+            (PartyRole::Buyer, BUYER_SEED),
+        ];
         for (role, expected_seed) in slots {
             let issued = request(role, &intent, 1);
             // Attacker generates a fresh key pair, signs the valid trade and
             // inserts its own public key into the authorization.
             let attacker = signing_key(0xA7);
             let forged = sign_locally(&issued, &attacker);
-            assert_eq!(forged.claimed_signer(), &attacker.verifying_key().to_bytes());
+            assert_eq!(
+                forged.claimed_signer(),
+                &attacker.verifying_key().to_bytes()
+            );
             assert_eq!(
                 verify_party_authorization(&forged, &issued, &party_key(expected_seed), now()),
                 Err(PartyAuthError::UnexpectedSigner)
@@ -706,7 +715,10 @@ mod tests {
         let intent = golden_intent();
         let expected = ExpectedParties::new(party_key(SELLER_SEED), party_key(BUYER_SEED)).unwrap();
         // Buyer's key signs the seller request and vice versa.
-        let swapped = [(PartyRole::Seller, BUYER_SEED), (PartyRole::Buyer, SELLER_SEED)];
+        let swapped = [
+            (PartyRole::Seller, BUYER_SEED),
+            (PartyRole::Buyer, SELLER_SEED),
+        ];
         for (role, wrong_seed) in swapped {
             let issued = request(role, &intent, 3);
             let auth = sign_locally(&issued, &signing_key(wrong_seed));
@@ -893,7 +905,10 @@ mod tests {
             Err(PartyAuthError::IdentitySourceUnconfigured)
         );
         let mut registry = RegisteredPartyKeys::new();
-        assert_eq!(registry.expected_parties(c), Err(PartyAuthError::UnknownTrade));
+        assert_eq!(
+            registry.expected_parties(c),
+            Err(PartyAuthError::UnknownTrade)
+        );
         let parties = ExpectedParties::new(party_key(SELLER_SEED), party_key(BUYER_SEED)).unwrap();
         registry.register(c, parties).unwrap();
         registry.register(c, parties).unwrap();

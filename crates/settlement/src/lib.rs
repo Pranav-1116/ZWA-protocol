@@ -133,7 +133,13 @@ mod boundary_tests {
     #[test]
     fn no_duplicate_replay_coordinator() {
         assert_absent(
-            &["replay", "persistentreplaystore", "tradelifecyclestate", "hashset", "mutex"],
+            &[
+                "replay",
+                "persistentreplaystore",
+                "tradelifecyclestate",
+                "hashset",
+                "mutex",
+            ],
             "M3 consumes M2 replay state and keeps none of its own (F-09)",
         );
     }
@@ -152,8 +158,14 @@ mod boundary_tests {
     fn workspace_does_not_build_archived_m4_code() {
         let manifest = include_str!("../../../Cargo.toml");
         for line in manifest.lines().map(str::trim) {
-            assert!(!line.contains("zcash-adapter"), "zcash-adapter is archived: {line}");
-            assert!(!line.contains("archive/"), "archive must not be compiled: {line}");
+            assert!(
+                !line.contains("zcash-adapter"),
+                "zcash-adapter is archived: {line}"
+            );
+            assert!(
+                !line.contains("archive/"),
+                "archive must not be compiled: {line}"
+            );
         }
     }
 
@@ -173,9 +185,17 @@ mod boundary_tests {
             .find(|l| l.starts_with("#[derive("))
             .expect("derive");
         assert!(!derive.contains("Copy"), "IVK must not be Copy: {derive}");
-        assert!(!derive.contains("Debug"), "IVK Debug must be manual/redacted: {derive}");
-        assert!(derive.contains("ZeroizeOnDrop"), "IVK must zeroize: {derive}");
-        assert!(lines.iter().any(|l| l.contains("OrchardIvkBytes(<redacted>)")));
+        assert!(
+            !derive.contains("Debug"),
+            "IVK Debug must be manual/redacted: {derive}"
+        );
+        assert!(
+            derive.contains("ZeroizeOnDrop"),
+            "IVK must zeroize: {derive}"
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("OrchardIvkBytes(<redacted>)")));
         assert!(
             !lines.iter().any(|l| l.contains("RealOrchard")),
             "simulated control must not be named Real (F-12)"

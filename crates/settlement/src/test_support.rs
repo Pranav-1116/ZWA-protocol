@@ -60,7 +60,6 @@ impl EligibilityVerifier for TestProofVerifier {
     }
 }
 
-
 /// Test proof bytes accepted by [`TestProofVerifier`] for `(root, commitment)`.
 pub(crate) fn test_proof(root: &str, commitment: &str) -> Vec<u8> {
     format!("zwa-settlement-test-proof|{root}|{commitment}").into_bytes()
