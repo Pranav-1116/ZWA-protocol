@@ -1,0 +1,171 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   ZWA design tokens
+   Palette: Void Navy / Cobalt (see website/README.md for the full table).
+   --------------------------------------------------------------------------- */
+@theme {
+  --color-void: #070a12;
+  --color-deep: #0b1020;
+  --color-surface: #111827;
+  --color-elevated: #172033;
+  --color-line: #253047;
+
+  --color-cobalt: #2563eb;
+  --color-cobalt-bright: #3b82f6;
+  --color-electric: #60a5fa;
+
+  --color-ink: #f8fafc;
+  --color-body: #94a3b8;
+  --color-muted: #64748b;
+
+  /* Light editorial section (lineage) */
+  --color-paper: #eef1f6;
+  --color-paper-line: #d5dbe5;
+  --color-paper-ink: #070a12;
+  --color-paper-body: #3c475a;
+
+  /* Functional / research status. Always paired with a text label. */
+  --color-established: #60a5fa;
+  --color-conditional: #a5b4fc;
+  --color-research: #d8b568;
+  --color-open: #64748b;
+  --color-rejected: #e77b7b;
+
+  --font-sans: "Manrope Variable", "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --ease-proof: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  html {
+    background: var(--color-void);
+    color: var(--color-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    scroll-padding-top: 88px;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    font-size: 17px;
+    line-height: 1.65;
+    min-height: 100vh;
+    overflow-x: clip;
+  }
+
+  @media (min-width: 1024px) {
+    body {
+      font-size: 18px;
+    }
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    color: var(--color-ink);
+    letter-spacing: -0.025em;
+    line-height: 1.06;
+    font-weight: 600;
+    text-wrap: balance;
+  }
+
+  ::selection {
+    background: rgba(37, 99, 235, 0.45);
+    color: #fff;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-electric);
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+}
+
+@layer components {
+  .mono-label {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    line-height: 1.4;
+  }
+
+  @media (min-width: 1024px) {
+    .mono-label {
+      font-size: 12px;
+    }
+  }
+
+  /* Faint coordinate grid, 2–6% opacity: discovered rather than noticed. */
+  .bg-coordinate-grid {
+    background-image:
+      linear-gradient(to right, rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+    background-size: 64px 64px;
+  }
+
+  /* Faint hexagonal contour detail (Architecture). Applied at 2–6% opacity. */
+  .bg-hex-contour {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='97' viewBox='0 0 56 97'%3E%3Cpath d='M28 0l28 16.2v32.3L28 64.7 0 48.5V16.2zM28 64.7v32.3' fill='none' stroke='%2360A5FA' stroke-width='1'/%3E%3C/svg%3E");
+    background-size: 56px 97px;
+    mask-image: radial-gradient(ellipse at 70% 50%, black, transparent 72%);
+  }
+
+  .glow-top {
+    background: radial-gradient(circle at 50% 0%, rgba(37, 99, 235, 0.14), transparent 55%);
+  }
+
+  .glow-hero {
+    background:
+      radial-gradient(circle at 68% 30%, rgba(37, 99, 235, 0.13), transparent 42%),
+      radial-gradient(circle at 15% 85%, rgba(96, 165, 250, 0.05), transparent 40%);
+  }
+
+  .redacted {
+    background: repeating-linear-gradient(
+      90deg,
+      rgba(148, 163, 184, 0.32) 0 6px,
+      rgba(148, 163, 184, 0.18) 6px 8px
+    );
+    border-radius: 2px;
+  }
+
+  .hairline {
+    background: linear-gradient(90deg, transparent, var(--color-line) 15%, var(--color-line) 85%, transparent);
+    height: 1px;
+  }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* The site must still be excellent with animation disabled. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes drawer {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
